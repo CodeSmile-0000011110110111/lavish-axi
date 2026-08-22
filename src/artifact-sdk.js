@@ -2062,6 +2062,12 @@ export function createArtifactSdk(
   // ---------------------------------------------------------------------------
 
   let activeCardContext = null;
+  // A text-annotation card's textarea, while it is deliberately still unfocused. Focusing a
+  // form control collapses the document's own selection in Chrome, and that is what stopped
+  // the browser's copy command from copying a selection the user had just made: the card
+  // appeared and Ctrl/Cmd+C put nothing on the clipboard. A text card therefore opens without
+  // taking focus, and this holds the textarea until the first printable keystroke asks for it.
+  let deferredCardFocus = null;
   let reviewStateTimer = 0;
   let draftRestoreTimer = 0;
   const REVIEW_DRAFT_ANCHOR_SETTLE_MS = 1500;
@@ -2214,6 +2220,7 @@ export function createArtifactSdk(
 
   function closeCard() {
     activeCardContext = null;
+    deferredCardFocus = null;
     if (activeAttachments) {
       activeAttachments.destroy();
       activeAttachments = null;
@@ -2419,7 +2426,33 @@ export function createArtifactSdk(
       // living until the next keystroke.
       scheduleReviewStateReport();
     }
-    setTimeout(() => textarea.focus(), 0);
+    // A card opened from a text selection leaves that selection alone: it stays selected and
+    // unfocused so the browser's own copy command still works while the card is on screen.
+    // `takeDeferredCardFocus` hands the textarea the focus on the first printable keystroke,
+    // so writing an annotation still costs no extra click. Every other card (an element or
+    // diagram-node click) has no selection to preserve and focuses immediately as before.
+    if (options.range) {
+      deferredCardFocus = textarea;
+    } else {
+      setTimeout(() => textarea.focus(), 0);
+    }
+  }
+
+  // Move focus into a waiting text-annotation card. Called from the capture-phase keydown
+  // below before the character is processed, so the keystroke that asks for focus is the
+  // first character of the annotation rather than a lost one.
+  function takeDeferredCardFocus() {
+    const textarea = deferredCardFocus;
+    deferredCardFocus = null;
+    if (textarea) textarea.focus();
+  }
+
+  // A printable key with no command modifier means the user is writing the annotation, not
+  // driving a browser shortcut. Ctrl/Cmd/Alt combinations are deliberately excluded: leaving
+  // them unfocused is what lets the browser's copy command act on the artifact selection.
+  function isAnnotationTypingKey(event) {
+    if (event.ctrlKey || event.metaKey || event.altKey) return false;
+    return String(event.key || "").length === 1;
   }
 
   function dataTransferHasFiles(dataTransfer) {
@@ -2489,6 +2522,19 @@ export function createArtifactSdk(
       if (!isModeToggleHotkeyEvent(event)) return;
       event.preventDefault();
       postArtifactMessage("lavish:toggleAnnotationMode");
+    },
+    true,
+  );
+
+  // A text-annotation card claims focus here rather than when it opened, so the selection the
+  // user just made stays selected - and stays copyable with the browser's own copy key - until
+  // they actually start writing. Capture phase, because nothing in the artifact has focus while
+  // the card waits. Chrome routes the character to whatever has focus once this handler
+  // returns, so the keystroke that asks for focus lands in the textarea instead of being lost.
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      if (isAnnotationTypingKey(event)) takeDeferredCardFocus();
     },
     true,
   );

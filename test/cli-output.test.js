@@ -2211,6 +2211,7 @@ test("shutdownServerOnPort kills pre-handshake Lavish servers when shutdown does
     fetchHealth: async () => ({ ok: true }),
     requestShutdown: async () => {
       shutdowns += 1;
+      return false;
     },
     waitForPortFree: async () => portFreeResults.shift() ?? false,
     killProcessOnPort: () => {
@@ -2234,6 +2235,7 @@ test("shutdownServerOnPort ignores unidentified health responders", async () => 
     fetchHealth: async () => ({ ok: true }),
     requestShutdown: async () => {
       shutdowns += 1;
+      return false;
     },
     waitForPortFree: async () => false,
     killProcessOnPort: () => {
@@ -2256,6 +2258,7 @@ test("open can resume a session without opening another browser window", () => {
   assert.match(getCommandHelp("open"), /--no-open/);
   assert.match(getCommandHelp("open"), /--no-gate/);
   assert.match(getCommandHelp("open"), /--reopen/);
+  assert.match(getCommandHelp("open"), /--focus/);
   assert.match(getCommandHelp("playbook"), /diagram/);
   assert.match(getCommandHelp("playbook"), /code/);
   assert.match(getCommandHelp("playbook"), /input/);
@@ -2513,4 +2516,41 @@ test("opening an artifact names that session as the one to reload across a versi
     recorder.close();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// Handing a URL to the operating system raises the window that already shows it, which is how
+// a resume, a reopen, or a reconnect after a server restart pulled the reviewer out of whatever
+// they were doing. A board already on screen must not be launched again.
+test("open leaves a board alone when a browser is already showing it", () => {
+  assert.equal(shouldOpenBrowser(["artifact.html"], {}, { browser_attached: true }), false);
+  assert.equal(shouldOpenBrowser(["artifact.html", "--reopen"], {}, { browser_attached: true }), false);
+  assert.equal(shouldOpenBrowser(["artifact.html"], {}, { browser_attached: false }), true);
+  // A response from a server too old to report attachment must still open, not silently show
+  // the user nothing.
+  assert.equal(shouldOpenBrowser(["artifact.html"], {}, {}), true);
+});
+
+// The one case that still needs the window raised is the user asking to be taken to the board.
+test("open --focus launches the browser even for an attached board", () => {
+  assert.equal(shouldOpenBrowser(["artifact.html", "--focus"], {}, { browser_attached: true }), true);
+  // --no-open still wins: it exists so a caller can guarantee no browser launch at all.
+  assert.equal(shouldOpenBrowser(["artifact.html", "--focus", "--no-open"], {}, { browser_attached: true }), false);
+  assert.equal(
+    shouldOpenBrowser(["artifact.html", "--focus"], { LAVISH_AXI_NO_OPEN: "1" }, { browser_attached: true }),
+    false,
+  );
+});
+
+// Replacing the server for an upgrade reloads the chrome showing the board being reopened. That
+// chrome reconnects a moment later, so the replacement server reports nothing attached and a
+// launch would raise a window over a tab that is already coming back.
+test("open leaves a board alone when the server it replaced was showing it", () => {
+  assert.equal(
+    shouldOpenBrowser(["artifact.html"], {}, { browser_attached: false, replaced_browser_attached: true }),
+    false,
+  );
+  assert.equal(
+    shouldOpenBrowser(["artifact.html"], {}, { browser_attached: false, replaced_browser_attached: false }),
+    true,
+  );
 });
