@@ -24,6 +24,7 @@ function createElement(tag) {
     textContent: "",
     offsetWidth: 100,
     offsetHeight: 100,
+    focusCount: 0,
     hidden: false,
     listeners: [],
     classList: {
@@ -81,7 +82,9 @@ function createElement(tag) {
       element.listeners.push({ type, handler });
     },
     removeEventListener() {},
-    focus() {},
+    focus() {
+      element.focusCount += 1;
+    },
     click() {},
     scrollIntoView() {},
     attachShadow() {
@@ -116,6 +119,8 @@ function bootSdk() {
   };
   /** @type {(selector: string) => any} */
   let documentQuery = () => null;
+  /** @type {any} */
+  let selection = null;
   const documentElement = createElement("html");
   const head = createElement("head");
   const body = createElement("body");
@@ -158,7 +163,7 @@ function bootSdk() {
       getElementById: () => null,
       querySelector: (selector) => documentQuery(selector),
       querySelectorAll: () => [],
-      getSelection: () => null,
+      getSelection: () => selection,
     },
   };
   const windowListeners = [];
@@ -190,6 +195,34 @@ function bootSdk() {
     },
     setDocumentQuery(query) {
       documentQuery = query;
+    },
+    // Drive the text-selection path the way the browser does: a drag leaves a live document
+    // selection behind, and the SDK reads it on mouseup. The range is anchored at the element
+    // itself, which is what a boundary-anchored range looks like to `rangeBoundary`.
+    selectText(element, text) {
+      const range = {
+        collapsed: false,
+        commonAncestorContainer: element,
+        startContainer: element,
+        startOffset: 0,
+        endContainer: element,
+        endOffset: text.length,
+        toString: () => text,
+        cloneRange() {
+          return range;
+        },
+        getBoundingClientRect: () => ({ left: 10, top: 10, right: 110, bottom: 40, width: 100, height: 30 }),
+        getClientRects: () => [],
+      };
+      selection = { rangeCount: 1, toString: () => text, getRangeAt: () => range };
+      const listener = documentListeners.find((entry) => entry.type === "mouseup");
+      assert.ok(listener, "the SDK registers a document mouseup listener");
+      listener.handler({ target: element, preventDefault() {}, stopPropagation() {} });
+    },
+    keydown(event) {
+      const listeners = documentListeners.filter((entry) => entry.type === "keydown");
+      assert.ok(listeners.length > 0, "the SDK registers a document keydown listener");
+      for (const listener of listeners) listener.handler({ preventDefault() {}, ...event });
     },
     runTimers() {
       const pending = timers.splice(0, timers.length);
@@ -426,4 +459,67 @@ test("the served SDK bundle drops a late restore once the user has opened a card
     sdk.posted.some((message) => message.type === "lavish:reviewDraftUnrestorable"),
     false,
   );
+});
+
+// Focusing a form control collapses the document's own selection in Chrome, so a card that
+// grabbed focus the moment it opened left the browser's copy command with nothing to copy:
+// every text selection ended with the card on screen and Ctrl/Cmd+C put nothing on the
+// clipboard. A text card must therefore open without taking focus.
+test("the served SDK bundle leaves a text selection focused nowhere so the browser can copy it", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Alpha bravo charlie"));
+
+  sdk.selectText(paragraph, "Alpha bravo charlie");
+  sdk.runTimers();
+
+  assert.equal(sdk.card().querySelector("textarea").focusCount, 0);
+});
+
+// The selection is only worth keeping until the user starts writing the annotation. The first
+// printable keystroke hands the textarea focus, so annotating still costs no extra click.
+test("the served SDK bundle focuses the text card on the first printable keystroke", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Alpha bravo charlie"));
+  sdk.selectText(paragraph, "Alpha bravo charlie");
+
+  sdk.keydown({ key: "a" });
+
+  assert.equal(sdk.card().querySelector("textarea").focusCount, 1);
+});
+
+// A command combination is the copy key itself, among others. Focusing on those is exactly the
+// bug: it would collapse the selection the user is about to copy.
+test("the served SDK bundle keeps the text card unfocused for a modified keystroke", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Alpha bravo charlie"));
+  sdk.selectText(paragraph, "Alpha bravo charlie");
+
+  sdk.keydown({ key: "c", ctrlKey: true });
+  sdk.keydown({ key: "c", metaKey: true });
+
+  assert.equal(sdk.card().querySelector("textarea").focusCount, 0);
+});
+
+// An element or diagram-node click has no selection to preserve, so it keeps focusing at once.
+test("the served SDK bundle still focuses an element annotation card immediately", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  sdk.runTimers();
+
+  assert.equal(sdk.card().querySelector("textarea").focusCount, 1);
+});
+
+// A stale textarea must never be focused by a keystroke that arrives after the card is gone.
+test("the served SDK bundle drops the deferred focus once the text card is closed", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Alpha bravo charlie"));
+  sdk.selectText(paragraph, "Alpha bravo charlie");
+  const textarea = sdk.card().querySelector("textarea");
+  sdk.card().querySelector(".lavish-cancel").onclick();
+
+  sdk.keydown({ key: "a" });
+
+  assert.equal(textarea.focusCount, 0);
 });
