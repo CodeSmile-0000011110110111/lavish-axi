@@ -251,7 +251,7 @@ async function openCommand(args) {
   const selfPaintWarning = await selfPaintWarningForFile(absolute);
   const noGate = args.includes("--no-gate");
   const reopen = args.includes("--reopen");
-  const baseUrl = await ensureServer({
+  const { baseUrl, replacedBrowserAttached } = await ensureServer({
     forceRestart: shouldForceRestartForLocalBuild(process.argv[1] || ""),
     reloadKey: sessionKey(absolute),
   });
@@ -259,7 +259,10 @@ async function openCommand(args) {
   if (response.status === "user-ended") {
     return createUserEndedOpenOutput({ file: absolute, url: response.url });
   }
-  if (shouldOpenBrowser(args, process.env)) {
+  // A chrome that this open just told to reload counts as attached even though it has not
+  // reconnected yet, otherwise replacing the server would launch a browser over the tab that is
+  // on its way back.
+  if (shouldOpenBrowser(args, process.env, { ...response, replaced_browser_attached: replacedBrowserAttached })) {
     try {
       const open = (await import("open")).default;
       await open(response.url);
@@ -286,8 +289,15 @@ async function selfPaintWarningForFile(absolute) {
   }
 }
 
-export function shouldOpenBrowser(args, env) {
-  return !args.includes("--no-open") && env.LAVISH_AXI_NO_OPEN !== "1";
+// Handing a URL to the operating system raises the window that already shows it, so a board
+// the reviewer already has on screen must not be launched again. Only an open that will
+// actually put a board somewhere it is not already visible launches the browser: a first open,
+// or one whose tab has been closed. A resume, a reopen, and a reconnect after a server restart
+// all reach this with a browser still attached and leave the reviewer's window alone.
+export function shouldOpenBrowser(args, env, session = {}) {
+  if (args.includes("--no-open") || env.LAVISH_AXI_NO_OPEN === "1") return false;
+  if (args.includes("--focus")) return true;
+  return !session.browser_attached && !session.replaced_browser_attached;
 }
 
 async function pollCommand(args) {
@@ -296,7 +306,7 @@ async function pollCommand(args) {
     throw new AxiError("HTML file path is required", "VALIDATION_ERROR", ["Run `lavish-axi poll <html-file>`"]);
   }
   const absolute = await canonicalFile(file);
-  const baseUrl = await ensureServer();
+  const { baseUrl } = await ensureServer();
   const agentReply = flagValue(args, "--agent-reply");
   if (agentReply) {
     await postJson(`${baseUrl}/api/${sessionKey(absolute)}/agent-reply`, { text: agentReply });
@@ -481,7 +491,7 @@ async function endCommand(args) {
     throw new AxiError("HTML file path is required", "VALIDATION_ERROR", ["Run `lavish-axi end <html-file>`"]);
   }
   const absolute = await canonicalFile(file);
-  const baseUrl = await ensureServer();
+  const { baseUrl } = await ensureServer();
   const response = await postJson(`${baseUrl}/api/end`, { file: absolute });
   return { session: { file: absolute, status: response.status || "ended" } };
 }
@@ -1068,12 +1078,16 @@ function isHtmlPath(file) {
 
 // `reloadKey` names the session this invocation is about to open. A version-driven replacement
 // reloads that chrome only; every other open review page is told it is outdated and left alone.
+// Returns the server's base URL plus, when this call replaced a running server, whether that
+// server had a browser showing `reloadKey`'s session. The replacement server cannot answer that:
+// its client list starts empty and the reloaded chrome reconnects a moment later.
 async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
   const port = defaultPort();
   const baseUrl = `http://${hostForUrl(clientHost())}:${port}`;
+  let replacedBrowserAttached = false;
   const existing = await fetchHealth(baseUrl);
   if (existing && !shouldRestartServer(VERSION, existing, forceRestart)) {
-    return baseUrl;
+    return { baseUrl, replacedBrowserAttached };
   }
   if (existing) {
     if (!(await canControlServerOnPort(port, existing, processOnPortMatchesLavish))) {
@@ -1083,7 +1097,10 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
     }
     // Stale server from an older release is squatting on the port. Ask it to shut down
     // gracefully so the upgraded client doesn't keep handing users an old chrome.
-    await requestShutdown(baseUrl, { reloadKey, reason: serverReplacementReason(VERSION, existing, forceRestart) });
+    replacedBrowserAttached = await requestShutdown(baseUrl, {
+      reloadKey,
+      reason: serverReplacementReason(VERSION, existing, forceRestart),
+    });
     const freed = await waitForPortFree(baseUrl, 2000);
     if (!freed) {
       // Pre-handshake servers (any release older than this change) don't expose /shutdown
@@ -1100,7 +1117,7 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
   while (Date.now() < deadline) {
     const health = await fetchHealth(baseUrl);
     if (health && !shouldRestartServer(VERSION, health)) {
-      return baseUrl;
+      return { baseUrl, replacedBrowserAttached };
     }
     await delay(100);
   }
@@ -1167,18 +1184,22 @@ async function fetchHealth(baseUrl) {
 
 // `reason` is what every other open review page is told: this CLI has exactly two callers, and
 // each knows which of them it is.
+// Returns whether the server being replaced had a browser showing `reloadKey`'s session, which
+// is what tells the caller that reopening it needs no browser launch.
 async function requestShutdown(baseUrl, { reloadKey = "", reason = "" } = {}) {
   const body = {};
   if (reloadKey) body.reload_key = reloadKey;
   if (reason) body.reason = reason;
   try {
-    await fetch(`${baseUrl}/shutdown`, {
+    const res = await fetch(`${baseUrl}/shutdown`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
+    return Boolean((await res.json())?.browser_attached);
   } catch {
     // Best effort. If the server died before answering, the port will free up on its own.
+    return false;
   }
 }
 
@@ -1386,7 +1407,7 @@ function createTopLevelHelp({ agent = "generic" } = {}) {
 
 function createCommandHelp({ agent = "generic" } = {}) {
   return {
-    open: `Usage: lavish-axi <html-file> [--no-open] [--no-gate] [--reopen]\n\nOpen or resume a Lavish Editor review session for an HTML artifact. Use --no-open when you need to ensure the server/session exists without opening another browser window. Use --no-gate to skip the open-time layout curtain for this browser open. If the user explicitly ended the session from the browser, this refuses to reopen it and returns guidance instead - pass --reopen to force it open when the user asks for further review or something important needs their visual attention. Sessions ended by the agent (\`lavish-axi end\`) reopen normally without the flag.\n`,
+    open: `Usage: lavish-axi <html-file> [--no-open] [--no-gate] [--reopen] [--focus]\n\nOpen or resume a Lavish Editor review session for an HTML artifact. The browser is launched only when no browser is already showing this board, because handing a URL to the operating system raises the window that already has it - a resume, a reopen, or a reconnect after a server restart therefore leaves the user's current window alone. Pass --focus to launch anyway when the user has asked to be taken to the board. Use --no-open when you need to ensure the server/session exists without opening another browser window. Use --no-gate to skip the open-time layout curtain for this browser open. If the user explicitly ended the session from the browser, this refuses to reopen it and returns guidance instead - pass --reopen to force it open when the user asks for further review or something important needs their visual attention. Sessions ended by the agent (\`lavish-axi end\`) reopen normally without the flag.\n`,
     poll: `Usage: lavish-axi poll <html-file> [--agent-reply "..."]\n\nThis command long-polls indefinitely for queued user prompts. It stays silent while it waits - that is normal, never kill it. Browser-detected layout issues do NOT return this poll: they are filed passively in the user's Layout issues inbox and arrive as an ordinary tag "layout-warnings" prompt only after the user selects them and queues the fixes. Warning lifecycle: an issue stays unresolved and counted while queued, becomes recurring if a newer artifact revision still shows it, and is resolved only after a newer artifact load plus a complete diagnostic pass at the same viewport no longer detects it. A failed or incomplete pass preserves it as unverified rather than clearing it. The only response that arrives without user action is artifact_failures - a fatal failure that made the review surface itself unusable. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. ${pollExecutionGuidance({ agent })} Use --agent-reply after applying prior feedback to display your response in Lavish Editor before waiting again. ${POLL_SEND_AND_END_RULE}\n`,
     end: `Usage: lavish-axi end <html-file>\n\nEnd a Lavish Editor session as the agent. A session ended this way still reopens normally on the next \`lavish-axi <html-file>\`, unlike a user ending it from the browser, which requires --reopen.\n`,
     export: `Usage: lavish-axi export <html-file> [--out <path>]\n\nWrite a portable copy of an artifact: one HTML file with its LOCAL assets inlined (relative-path stylesheets, scripts, images, and fonts become inline <style>/<script> blocks and data URIs). Remote CDN/font references (https URLs) are left as links for the browser to load, so the file needs network to render those. Lavish makes no outbound requests - it only reads local files, confined to the artifact's directory. Defaults to writing <name>.export.html next to the source; pass --out to choose a path. The Lavish annotation SDK is never included in an export.\n`,

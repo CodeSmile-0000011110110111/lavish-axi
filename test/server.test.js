@@ -5242,3 +5242,134 @@ test("extractArtifactHead reads the real href, not one hidden in another attribu
   );
   assert.equal(inValue.faviconTag, '<link rel="icon" href="https://cdn.example.com/logo.png">');
 });
+
+// Handing an already-open URL to the operating system raises the window that has it, which is
+// what pulled the reviewer away from their work on every resume, reopen, and reconnect. The
+// route reports whether a browser is attached so the CLI can launch only when nothing is
+// already showing the board.
+test("the sessions route reports whether a browser is already showing the board", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  const openSession = async () => {
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    return res.json();
+  };
+  try {
+    const first = await openSession();
+    assert.equal(first.browser_attached, false);
+
+    const events = await fetch(`http://127.0.0.1:${server.port}/events/${first.key}`);
+    const reader = events.body.getReader();
+    // Read the stream's first frame so the route has registered this client before asking.
+    await reader.read();
+
+    assert.equal((await openSession()).browser_attached, true);
+
+    await reader.cancel();
+    // Give the server's `close` handler a turn to drop the client.
+    for (let i = 0; i < 50; i++) {
+      if ((await openSession()).browser_attached === false) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal((await openSession()).browser_attached, false);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// One session's open tab must not suppress another board's first launch.
+test("the sessions route scopes browser attachment to the board being opened", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const watched = path.join(dir, "watched.html");
+  const other = path.join(dir, "other.html");
+  await writeFile(watched, "<!doctype html><html><body></body></html>");
+  await writeFile(other, "<!doctype html><html><body></body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  const openSession = async (file) => {
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file }),
+    });
+    return res.json();
+  };
+  try {
+    const first = await openSession(watched);
+    const events = await fetch(`http://127.0.0.1:${server.port}/events/${first.key}`);
+    const reader = events.body.getReader();
+    await reader.read();
+
+    assert.equal((await openSession(watched)).browser_attached, true);
+    assert.equal((await openSession(other)).browser_attached, false);
+
+    await reader.cancel();
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// A server replaced for an upgrade tells the chrome showing the reopened board to reload. That
+// chrome reconnects to the replacement a moment later, so only the server on its way out can
+// answer whether the board is already on screen. Without this the CLI launches a browser over
+// a tab that is already coming back, and the reviewer's window is raised.
+test("the shutdown route reports whether the reloaded session had a browser attached", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+
+  const openAndAttach = async (server) => {
+    const session = await (
+      await fetch(`http://127.0.0.1:${server.port}/api/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ file: artifact }),
+      })
+    ).json();
+    const events = await fetch(`http://127.0.0.1:${server.port}/events/${session.key}`);
+    const reader = events.body.getReader();
+    await reader.read();
+    return { key: session.key, reader };
+  };
+  const shutdown = (server, body) =>
+    fetch(`http://127.0.0.1:${server.port}/shutdown`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }).then((res) => res.json());
+
+  let server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const attached = await openAndAttach(server);
+    assert.equal((await shutdown(server, { reload_key: attached.key })).browser_attached, true);
+    await attached.reader.cancel().catch(() => {});
+  } finally {
+    await server.close();
+  }
+
+  server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const attached = await openAndAttach(server);
+    // A shutdown naming a different session reloads nothing, so it reports nothing attached.
+    assert.equal((await shutdown(server, { reload_key: "some-other-key" })).browser_attached, false);
+    await attached.reader.cancel().catch(() => {});
+  } finally {
+    await server.close();
+  }
+
+  server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    // A shutdown naming no session (`lavish-axi stop`, idle self-shutdown) reloads nothing.
+    assert.equal((await shutdown(server, {})).browser_attached, false);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

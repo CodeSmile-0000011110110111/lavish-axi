@@ -254,6 +254,12 @@ export async function serve({
   // Keyed by session so a version-driven shutdown can reload the one chrome whose artifact is
   // being reopened and leave every other open review page on screen.
   const sseClients = new Map();
+  const hasSseClient = (key) => {
+    for (const clientKey of sseClients.values()) {
+      if (clientKey === key) return true;
+    }
+    return false;
+  };
   const whiteboardChannelSecret = crypto.randomBytes(32);
   // Sessions with at least one warning the user queued that has not been re-checked yet.
   const outstandingRepairBatches = new Set();
@@ -433,7 +439,11 @@ export async function serve({
     // an unrecognized or absent reason claims nothing beyond "this server is gone".
     const reloadKey = String(req.body?.reload_key || "");
     const reason = SHUTDOWN_REASONS.has(String(req.body?.reason || "")) ? String(req.body.reason) : "";
-    res.json({ status: "shutting-down" });
+    // Whether a browser is showing the session the caller is about to reopen. The replacement
+    // server starts with no clients, and the reloaded chrome takes a moment to reconnect, so
+    // asking the new server would report "nothing attached" and the CLI would launch a browser
+    // over a tab that is already coming back. This is the only moment that answer exists.
+    res.json({ status: "shutting-down", browser_attached: reloadKey ? hasSseClient(reloadKey) : false });
     // Defer until after the response flushes so the client gets confirmation.
     setImmediate(() => shutdown(reloadKey, reason));
   });
@@ -463,7 +473,13 @@ export async function serve({
       logEvent?.(`session opened key=${key} file=${file}`);
       await syncOutstandingRepairs(key);
       await watchSession(session, watchers, events, logEvent, reloadDebounceMs);
-      res.json({ key, file, url, status: "opened" });
+      // The CLI launches the browser only when nothing is already showing this board. An
+      // already-open tab is what the operating system raises to the foreground when a URL is
+      // handed to it again, and a resume, a reopen, or a reconnect after a server restart all
+      // run this route while the reviewer is working in another window. Attachment is measured
+      // by live SSE clients for this key, so it reports what is on screen now rather than what
+      // state.json remembers.
+      res.json({ key, file, url, status: "opened", browser_attached: hasSseClient(key) });
     } catch (error) {
       next(error);
     }
