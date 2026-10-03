@@ -10,10 +10,10 @@ const sourceUrl = new URL("../src/chrome-client.js", import.meta.url);
 // The ids the served chrome page actually declares. The client reaches for these by id, so a page
 // that stopped declaring one would leave the corresponding feature silently dead behind an
 // `if (element)` guard - a harness that invents an element for any id would never notice.
-const servedChromeIds = new Set(
-  [...createChromeHtml({ key: "abc", file: "/tmp/artifact.html" }).matchAll(/\sid="([^"]+)"/g)].map(
-    (match) => match[1],
-  ),
+const servedChromeHtml = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
+const servedChromeIds = new Set([...servedChromeHtml.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]));
+const servedHiddenChromeIds = new Set(
+  [...servedChromeHtml.matchAll(/<[^>]*\sid="([^"]+)"[^>]*\shidden[\s>]/g)].map((match) => match[1]),
 );
 
 /** @typedef {{ key: string, file: string, layoutGateEnabled?: boolean, layoutGateMaxHoldMs?: number, modeToggleHotkeyKey?: string, initialLayoutWarnings?: any[], chromeLoadToken?: string, initialArtifactRevision?: number, initialArtifactLoadToken?: string, initialArtifactLoadSequence?: number, attachmentMaxBytes?: number, attachmentMaxCount?: number, attachmentAcceptedMime?: string[] }} HarnessSessionData */
@@ -93,7 +93,7 @@ async function createChromeHarness({
     const classes = new Set();
     const el = {
       id,
-      hidden: false,
+      hidden: servedHiddenChromeIds.has(id),
       disabled: false,
       checked: false,
       indeterminate: false,
@@ -5020,4 +5020,171 @@ test("crossing the breakpoint in either direction leaves no sheet state behind",
   assert.equal(state.scrollInert, true);
   assert.equal(chrome.focusLog.at(-1), "panelToggle");
   assert.equal(chrome.storage.has("lavish-axi:sheet-open:abc"), false);
+});
+
+test("the wide Conversation switch preserves drafts and restores its per-session preference", async () => {
+  const chrome = await createChromeHarness();
+  const toggle = chrome.element("conversationToggle");
+  assert.ok(servedChromeIds.has("conversationToggle"), "the toolbar declares the conversation control");
+  assert.equal(toggle["aria-pressed"], "true");
+  chrome.element("chatInput").value = "Keep this draft";
+  toggle.click();
+  assert.equal(toggle["aria-pressed"], "false");
+  assert.equal(chrome.element("body").classList.contains("conversation-hidden"), true);
+  assert.equal(chrome.element("panel").inert, true);
+  assert.equal(chrome.element("chatInput").value, "Keep this draft");
+  assert.match(chrome.element("conversationStatus").textContent, /Agent not listening/);
+
+  const otherSession = await createChromeHarness({
+    storage: chrome.storage,
+    sessionData: { ...defaultSessionData, key: "other" },
+  });
+  assert.equal(otherSession.element("conversationToggle")["aria-pressed"], "true");
+
+  const reloaded = await createChromeHarness({ storage: chrome.storage });
+  assert.equal(reloaded.element("conversationToggle")["aria-pressed"], "false");
+  reloaded.element("conversationToggle").click();
+  assert.equal(reloaded.element("panel").inert, false);
+  assert.equal(reloaded.element("conversationToggle")["aria-pressed"], "true");
+});
+
+test("a hidden wide Conversation reports queued feedback and new replies without covering the artifact", async () => {
+  const chrome = await createChromeHarness();
+  chrome.element("conversationToggle").click();
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "Keep the title", selector: "h1", tag: "element" },
+  });
+  assert.match(chrome.element("conversationStatus").textContent, /1 queued/);
+  assert.match(chrome.element("conversationStatus").textContent, /Agent not listening/);
+  chrome.eventSource().listeners.get("agent-reply")({ data: JSON.stringify({ text: "Updated the title" }) });
+  assert.match(chrome.element("conversationStatus").textContent, /New reply/);
+  assert.equal(chrome.element("conversationToggle")["aria-pressed"], "false");
+  chrome.element("conversationToggle").click();
+  chrome.element("conversationToggle").click();
+  assert.doesNotMatch(chrome.element("conversationStatus").textContent, /New reply/);
+});
+
+test("server and other-tab notices reveal a hidden wide Conversation", async () => {
+  const chrome = await createChromeHarness();
+  chrome.element("conversationToggle").click();
+  chrome.eventSource().listeners.get("chrome-outdated")({ data: JSON.stringify({ reason: "stop" }) });
+  assert.equal(chrome.element("outdatedBanner").hidden, false);
+  assert.equal(chrome.element("conversationToggle")["aria-pressed"], "true");
+  chrome.element("conversationToggle").click();
+  assert.match(chrome.element("conversationStatus").textContent, /Server notice/);
+  chrome.eventSource().listeners.get("chrome-outdated")({ data: JSON.stringify({ reason: "stop" }) });
+  assert.equal(chrome.element("conversationToggle")["aria-pressed"], "false");
+  assert.match(chrome.element("conversationStatus").textContent, /Server notice/);
+
+  const superseded = await createChromeHarness({
+    storage: new Map([["lavish-axi:conversation-hidden:abc", "true"]]),
+    artifactSrc: "/artifact/abc/index.html",
+    beginLoadResponses: [
+      { ok: false, status: 409, json: async () => ({ status: "superseded" }) },
+      { ok: false, status: 409, json: async () => ({ status: "superseded" }) },
+    ],
+  });
+  await flushPromises();
+  assert.equal(superseded.element("handoffBanner").hidden, false);
+  assert.equal(superseded.element("conversationToggle")["aria-pressed"], "true");
+  superseded.element("conversationToggle").click();
+  superseded.eventSource().listeners.get("reload")();
+  await flushPromises();
+  await flushPromises();
+  assert.equal(superseded.element("handoffBanner").hidden, false);
+  assert.equal(superseded.element("conversationToggle")["aria-pressed"], "false");
+  assert.match(superseded.element("conversationStatus").textContent, /Open in another tab/);
+});
+
+test("wide Conversation intent is independent of the phone sheet and moves focus out of hidden content", async () => {
+  const chrome = await createChromeHarness({ mobile: true });
+  chrome.setMobile(false);
+  chrome.element("conversationToggle").click();
+  chrome.setMobile(true);
+  assert.equal(chrome.element("panel").inert, false);
+  chrome.element("panelHead").dispatch("click", {});
+  assert.equal(sheetState(chrome).open, true);
+  chrome.element("chatComposer").appendChild(chrome.element("chatInput"));
+  chrome.element("chatInput").focus();
+  chrome.setMobile(false);
+  assert.equal(chrome.element("conversationToggle")["aria-pressed"], "false");
+  assert.equal(chrome.element("panel").inert, true);
+  assert.equal(chrome.focusLog.at(-1), "conversationToggle");
+  chrome.setMobile(true);
+  assert.equal(sheetState(chrome).open, false);
+  assert.equal(chrome.element("panel").inert, false);
+});
+
+test("an attachment failure reveals a hidden wide Conversation with retry controls", async () => {
+  /** @type {(value: any) => void} */
+  let resolveUpload = () => {};
+  const chrome = await createChromeHarness({
+    sessionData: { ...defaultSessionData, attachmentMaxBytes: 1024, attachmentMaxCount: 4 },
+    fetchImpl: () => new Promise((resolve) => (resolveUpload = resolve)),
+  });
+  chrome.element("chatInput").dispatch("paste", clipboardEvent(pastedImage("pending.png")));
+  await flushPromises();
+  chrome.element("conversationToggle").click();
+  resolveUpload({ ok: false, json: async () => ({ error: "storage full" }) });
+  await flushPromises();
+  await flushPromises();
+  assert.equal(chrome.element("conversationToggle")["aria-pressed"], "true");
+  assert.match(chrome.element("chatAttachments").innerHTML, /aria-label="Retry pending\.png"/);
+});
+
+test("an attachment failure the user already saw does not re-reveal a hidden wide Conversation", async () => {
+  /** @type {Array<(value: any) => void>} */
+  const resolvers = [];
+  const chrome = await createChromeHarness({
+    sessionData: { ...defaultSessionData, attachmentMaxBytes: 1024, attachmentMaxCount: 4 },
+    fetchImpl: () => new Promise((resolve) => resolvers.push(resolve)),
+  });
+  chrome.element("chatInput").dispatch("paste", clipboardEvent(pastedImage("first.png")));
+  await flushPromises();
+  chrome.element("conversationToggle").click();
+  resolvers[0]({ ok: false, json: async () => ({ error: "storage full" }) });
+  await flushPromises();
+  await flushPromises();
+  assert.equal(chrome.element("conversationToggle")["aria-pressed"], "true");
+
+  chrome.element("chatInput").dispatch("paste", clipboardEvent(pastedImage("second.png")));
+  await flushPromises();
+  chrome.element("conversationToggle").click();
+  resolvers[1]({ ok: true, json: async () => ({ attachment: { id: "a".repeat(64) + ".png" } }) });
+  await flushPromises();
+  await flushPromises();
+  assert.equal(chrome.element("conversationToggle")["aria-pressed"], "false");
+  assert.match(chrome.element("chatAttachments").innerHTML, /aria-label="Retry first\.png"/);
+});
+
+test("a send failure reveals the hidden wide Conversation and keeps the queued message", async () => {
+  /** @type {(value: any) => void} */
+  let resolveSend = () => {};
+  const chrome = await createChromeHarness({
+    fetchImpl: () => new Promise((resolve) => (resolveSend = resolve)),
+  });
+  chrome.element("chatInput").value = "Keep the heading";
+  chrome.element("send").click();
+  chrome.sendFrameMessage({ type: "lavish:snapshot", snapshot: "uid=1 body" });
+  await flushPromises();
+  chrome.element("conversationToggle").click();
+  resolveSend({ ok: false, json: async () => ({ error: "failed" }) });
+  await flushPromises();
+  await flushPromises();
+  assert.equal(chrome.element("conversationToggle")["aria-pressed"], "true");
+  assert.equal(chrome.element("sendHint").hidden, false);
+  assert.equal(chrome.queued()[0].prompt, "Keep the heading");
+});
+
+test("refused session storage does not prevent the wide Conversation from toggling", async () => {
+  const storage = new Map();
+  storage.set = () => {
+    throw new Error("Storage unavailable");
+  };
+  const chrome = await createChromeHarness({ storage });
+  chrome.element("conversationToggle").click();
+  assert.equal(chrome.element("conversationToggle")["aria-pressed"], "false");
+  chrome.element("conversationToggle").click();
+  assert.equal(chrome.element("conversationToggle")["aria-pressed"], "true");
 });
