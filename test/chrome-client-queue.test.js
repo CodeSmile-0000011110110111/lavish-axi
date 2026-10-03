@@ -5133,6 +5133,31 @@ test("an attachment failure reveals a hidden wide Conversation with retry contro
   assert.match(chrome.element("chatAttachments").innerHTML, /aria-label="Retry pending\.png"/);
 });
 
+test("an attachment failure the user already saw does not re-reveal a hidden wide Conversation", async () => {
+  /** @type {Array<(value: any) => void>} */
+  const resolvers = [];
+  const chrome = await createChromeHarness({
+    sessionData: { ...defaultSessionData, attachmentMaxBytes: 1024, attachmentMaxCount: 4 },
+    fetchImpl: () => new Promise((resolve) => resolvers.push(resolve)),
+  });
+  chrome.element("chatInput").dispatch("paste", clipboardEvent(pastedImage("first.png")));
+  await flushPromises();
+  chrome.element("conversationToggle").click();
+  resolvers[0]({ ok: false, json: async () => ({ error: "storage full" }) });
+  await flushPromises();
+  await flushPromises();
+  assert.equal(chrome.element("conversationToggle")["aria-pressed"], "true");
+
+  chrome.element("chatInput").dispatch("paste", clipboardEvent(pastedImage("second.png")));
+  await flushPromises();
+  chrome.element("conversationToggle").click();
+  resolvers[1]({ ok: true, json: async () => ({ attachment: { id: "a".repeat(64) + ".png" } }) });
+  await flushPromises();
+  await flushPromises();
+  assert.equal(chrome.element("conversationToggle")["aria-pressed"], "false");
+  assert.match(chrome.element("chatAttachments").innerHTML, /aria-label="Retry first\.png"/);
+});
+
 test("a send failure reveals the hidden wide Conversation and keeps the queued message", async () => {
   /** @type {(value: any) => void} */
   let resolveSend = () => {};

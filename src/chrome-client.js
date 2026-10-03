@@ -997,13 +997,16 @@ function createChatAttachmentsController() {
   let nextId = 0;
   let capRejected = false;
   let sendBlocked = false;
+  let shownErrorIds = new Set();
 
   function currentImageCount() {
     return items.filter((item) => item.file && CHAT_ATTACHMENT_MIME.has(item.file.type)).length;
   }
 
   function renderAttachments() {
-    if (items.some((item) => item.status === "error")) revealConversation();
+    const errorIds = new Set(items.filter((item) => item.status === "error").map((item) => item.localId));
+    if ([...errorIds].some((id) => !shownErrorIds.has(id))) revealConversation();
+    shownErrorIds = errorIds;
     chatAttachments.innerHTML = items
       .map((item) => {
         const status = item.status === "uploading" ? "Uploading…" : item.status === "error" ? item.error : "";
