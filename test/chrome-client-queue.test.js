@@ -10,10 +10,10 @@ const sourceUrl = new URL("../src/chrome-client.js", import.meta.url);
 // The ids the served chrome page actually declares. The client reaches for these by id, so a page
 // that stopped declaring one would leave the corresponding feature silently dead behind an
 // `if (element)` guard - a harness that invents an element for any id would never notice.
-const servedChromeIds = new Set(
-  [...createChromeHtml({ key: "abc", file: "/tmp/artifact.html" }).matchAll(/\sid="([^"]+)"/g)].map(
-    (match) => match[1],
-  ),
+const servedChromeHtml = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
+const servedChromeIds = new Set([...servedChromeHtml.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]));
+const servedHiddenChromeIds = new Set(
+  [...servedChromeHtml.matchAll(/<[^>]*\sid="([^"]+)"[^>]*\shidden[\s>]/g)].map((match) => match[1]),
 );
 
 /** @typedef {{ key: string, file: string, layoutGateEnabled?: boolean, layoutGateMaxHoldMs?: number, modeToggleHotkeyKey?: string, initialLayoutWarnings?: any[], chromeLoadToken?: string, initialArtifactRevision?: number, initialArtifactLoadToken?: string, initialArtifactLoadSequence?: number, attachmentMaxBytes?: number, attachmentMaxCount?: number, attachmentAcceptedMime?: string[] }} HarnessSessionData */
@@ -93,7 +93,7 @@ async function createChromeHarness({
     const classes = new Set();
     const el = {
       id,
-      hidden: false,
+      hidden: servedHiddenChromeIds.has(id),
       disabled: false,
       checked: false,
       indeterminate: false,
@@ -5073,15 +5073,28 @@ test("server and other-tab notices reveal a hidden wide Conversation", async () 
   assert.equal(chrome.element("conversationToggle")["aria-pressed"], "true");
   chrome.element("conversationToggle").click();
   assert.match(chrome.element("conversationStatus").textContent, /Server notice/);
+  chrome.eventSource().listeners.get("chrome-outdated")({ data: JSON.stringify({ reason: "stop" }) });
+  assert.equal(chrome.element("conversationToggle")["aria-pressed"], "false");
+  assert.match(chrome.element("conversationStatus").textContent, /Server notice/);
 
   const superseded = await createChromeHarness({
     storage: new Map([["lavish-axi:conversation-hidden:abc", "true"]]),
     artifactSrc: "/artifact/abc/index.html",
-    beginLoadResponses: [{ ok: false, status: 409, json: async () => ({ status: "superseded" }) }],
+    beginLoadResponses: [
+      { ok: false, status: 409, json: async () => ({ status: "superseded" }) },
+      { ok: false, status: 409, json: async () => ({ status: "superseded" }) },
+    ],
   });
   await flushPromises();
   assert.equal(superseded.element("handoffBanner").hidden, false);
   assert.equal(superseded.element("conversationToggle")["aria-pressed"], "true");
+  superseded.element("conversationToggle").click();
+  superseded.eventSource().listeners.get("reload")();
+  await flushPromises();
+  await flushPromises();
+  assert.equal(superseded.element("handoffBanner").hidden, false);
+  assert.equal(superseded.element("conversationToggle")["aria-pressed"], "false");
+  assert.match(superseded.element("conversationStatus").textContent, /Open in another tab/);
 });
 
 test("wide Conversation intent is independent of the phone sheet and moves focus out of hidden content", async () => {

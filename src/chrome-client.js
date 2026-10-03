@@ -568,8 +568,9 @@ function setAgentPresence(state) {
 }
 
 function setHandoffSuperseded(visible) {
+  const wasHidden = !handoffBanner || handoffBanner.hidden;
   if (handoffBanner) handoffBanner.hidden = ended || !visible;
-  if (visible && !ended) revealConversation();
+  if (visible && !ended && wasHidden) revealConversation();
   renderConversationStatus();
 }
 
@@ -603,8 +604,9 @@ function setChromeOutdated(visible, reason = chromeOutdatedReason) {
   if (outdatedText) outdatedText.textContent = chromeOutdatedCopy(chromeOutdatedReason);
   outdatedReloadInFlight = false;
   if (outdatedReloadButton) outdatedReloadButton.disabled = false;
+  const wasHidden = !outdatedBanner || outdatedBanner.hidden;
   if (outdatedBanner) outdatedBanner.hidden = ended || !visible;
-  if (visible && !ended) revealConversation();
+  if (visible && !ended && wasHidden) revealConversation();
   renderConversationStatus();
 }
 
