@@ -912,8 +912,73 @@ function chatBubbleHtml(entry) {
     "<small>You</small>" +
     anchorHtml(entry.anchor) +
     userBubbleTextHtml(entry, entry.text) +
-    bubbleAttachmentsHtml(entry)
+    bubbleAttachmentsHtml(entry) +
+    receiptHtml(entry)
   );
+}
+
+// Delivery receipt (docs/delivery-acks.md): the per-note view of what the server observed. Seen,
+// Working, and Done are stamps on the entry, so the row is derived from it on every render and
+// never tracked here. Before Seen, the row says why, from the presence the live stream reports.
+// The three steps are the emoji of the Telegram ack protocol the receipt mirrors (seen, working,
+// done); a step that has not happened is the same glyph dimmed, and every step carries its label
+// and time as `title` and `aria-label`, so hover and screen readers both say the word.
+const RECEIPT_EMOJI = { Seen: "\u{1F440}", Working: "\u{1F6E0}️", Done: "✅" };
+
+function receiptTime(at) {
+  const date = new Date(String(at));
+  return Number.isNaN(date.getTime())
+    ? String(at)
+    : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function receiptStepHtml(label, at) {
+  const ticked = Boolean(at);
+  const text = ticked ? label + " " + receiptTime(at) : label + ": not yet";
+  return (
+    '<span class="receipt-step' +
+    (ticked ? " is-done" : "") +
+    '" role="img" aria-label="' +
+    escapeHtml(text) +
+    '" title="' +
+    escapeHtml(text) +
+    '">' +
+    RECEIPT_EMOJI[label] +
+    "</span>"
+  );
+}
+
+// Every branch must be true where it is shown: `waiting` is no poll at all, `listening` is a poll
+// that will take the note within milliseconds, and `working` or an external listener is an agent
+// whose next poll will take it.
+function receiptNoteText() {
+  if (agentPresence === "waiting") return "No agent is listening";
+  if (agentPresence === "listening") return "Delivering";
+  return "Agent is busy; delivered on its next poll";
+}
+
+// A transcript entry from before receipts existed (`receipt: "none"`, marked by the server once at
+// load) gets no row: nothing was ever observed about it, and an empty row would read as "never seen".
+function hasReceipt(entry) {
+  return Boolean(entry) && entry.receipt !== "none";
+}
+
+function receiptHtml(entry) {
+  if (!hasReceipt(entry)) return "";
+  return (
+    '<div class="receipt">' +
+    receiptStepHtml("Seen", entry.delivered_at) +
+    receiptStepHtml("Working", entry.working_at) +
+    receiptStepHtml("Done", entry.done_at) +
+    (entry.delivered_at ? "" : '<span class="receipt-note">' + escapeHtml(receiptNoteText()) + "</span>") +
+    "</div>"
+  );
+}
+
+// Only the pre-Seen line names the live presence, so a presence change rewrites that line alone.
+// Rebuilding the bubble would also rebuild its thumbnails and undo an "Image expired" placeholder.
+function refreshUnseenReceipts() {
+  for (const note of chatLog.querySelectorAll(".receipt-note")) note.textContent = receiptNoteText();
 }
 
 function addChat(entry, shouldScroll = true) {
@@ -1067,6 +1132,7 @@ function setAgentPresence(state) {
   agentPresence = state === "listening" || state === "external" || state === "working" ? state : "waiting";
   updateSendState();
   renderSheetSummary();
+  refreshUnseenReceipts();
   if (presenceBanner) presenceBanner.hidden = ended || agentPresence !== "waiting";
 
   // A supervisor-owned process-only listener is busy on the agent's behalf. It must not make the

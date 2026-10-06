@@ -369,7 +369,17 @@ export async function serve({
   // One listener per event scales independently of the number of open review tabs and avoids the
   // EventEmitter listener warning the former one-listener-per-SSE-client design reached at only a
   // few boards.
-  events.on("reload", (key) => broadcastLiveEvent("reload", key));
+  events.on("reload", (key) => {
+    broadcastLiveEvent("reload", key);
+    // Working (docs/delivery-acks.md): a save after a delivery is the agent acting on what it was
+    // handed. The store writes nothing when no delivered, unanswered note exists.
+    store
+      .markWorking(key)
+      .then((session) => {
+        if (session) events.emit("chat-sync", key, session);
+      })
+      .catch((error) => writeLog(`[lavish] working stamp after reload failed: ${error?.message || error}`));
+  });
   // The transcript the chrome renders is computed here (src/chat-messages.js): agent text ships
   // with its rendered html, user entries ship as text with their anchor, never as html.
   events.on("agent-reply", (key, entry) => broadcastLiveEvent("agent-reply", key, entry));
@@ -510,6 +520,28 @@ export async function serve({
   function finishFeedbackDelivery(key, result) {
     if (result.status !== "feedback") return;
     markFeedbackDelivered(key, activePolls, deliveredFeedback, events);
+    // The take already stamped the batch Seen in state.json (docs/delivery-acks.md); tell the open
+    // tabs only now, on the path that is about to write the response, never from the destructive
+    // take itself, so a tab is not told Seen for a batch a disconnect is about to put back.
+    void publishChatSync(key);
+  }
+
+  async function publishChatSync(key) {
+    try {
+      const session = await store.findByKey(key);
+      if (session) events.emit("chat-sync", key, session);
+    } catch (error) {
+      writeLog(`[lavish] chat-sync after delivery failed: ${error?.message || error}`);
+    }
+  }
+
+  // What the agent receives. `delivery_seq` is the store's own bookkeeping for undoing a take's Seen
+  // stamps on a closed poll; it means nothing to an agent and stays off the wire.
+  function agentFacingFeedback(result) {
+    if (!result || result.status !== "feedback" || !("delivery_seq" in result)) return result;
+    const rest = { ...result };
+    delete rest.delivery_seq;
+    return rest;
   }
 
   // `takeFeedback` is destructive: it clears the batch from `state.json` before anything is
@@ -535,6 +567,8 @@ export async function serve({
           dom_snapshot: result.dom_snapshot || "",
           prompts,
           ...(Array.isArray(result.artifact_failures) ? { artifact_failures: result.artifact_failures } : {}),
+          // Lets the store take this take's Seen stamps off again (docs/delivery-acks.md).
+          ...(Number.isInteger(result.delivery_seq) ? { delivery_seq: result.delivery_seq } : {}),
         },
         {
           restore: true,
@@ -565,7 +599,7 @@ export async function serve({
         `[lavish] closed poll feedback restore failed; the batch was lost: ${restoreError?.message || restoreError}`,
       );
     } else if (persistedNothing) {
-      writeLog("[lavish] closed poll feedback restore was refused; nothing was persisted and the batch was lost");
+      writeLog("[lavish] closed poll feedback restore was refused; nothing was re-queued and the batch was lost");
     } else if (!restoredPrompts || JSON.stringify(restoredPrompts) !== JSON.stringify(prompts) || !failuresRestored) {
       writeLog("[lavish] closed poll feedback restore was incomplete; delivery was not marked");
     }
@@ -573,6 +607,9 @@ export async function serve({
       (Array.isArray(restoredPrompts) && restoredPrompts.length > 0) ||
       (Array.isArray(restoredFailures) && restoredFailures.length > 0);
     if (pendingAfterRestore) events.emit("feedback", key);
+    // A tab that saw the batch stamped Seen between the take and this restore learns it is not -
+    // a refused restore included, which still takes the stamps off.
+    await publishChatSync(key);
   }
   // Whiteboard sidecar files live next to state.json, keyed by session + diagram.
   const whiteboardStateRoot = path.dirname(stateFile);
@@ -919,7 +956,7 @@ export async function serve({
         releasePollListener(holder, activePolls, deliveredFeedback, events);
         if (immediate.session_ended) clearFeedbackDelivery(key, activePolls, deliveredFeedback, events);
         detachRequestClose();
-        res.json(immediate);
+        res.json(agentFacingFeedback(immediate));
         return;
       }
       if (holder.replaced) {
@@ -1000,10 +1037,11 @@ export async function serve({
             return;
           }
           finishFeedbackDelivery(key, responseResult);
+          const agentResponse = agentFacingFeedback(responseResult);
           if (streamHeartbeat) {
-            res.end(JSON.stringify(responseResult));
+            res.end(JSON.stringify(agentResponse));
           } else {
-            res.json(responseResult);
+            res.json(agentResponse);
           }
         } finally {
           cleanup();

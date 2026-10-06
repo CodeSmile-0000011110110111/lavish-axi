@@ -5459,12 +5459,19 @@ test("a disconnect during immediate feedback take requeues the batch without wor
       await presence.close();
     }
 
+    // The restore re-appended nothing and took the failed take's Seen stamps off again.
+    assert.deepEqual(JSON.parse(await readFile(stateFile, "utf8")).sessions[key].chat, beforeState.chat);
+
     const next = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`);
     const feedback = await next.json();
     assert.equal(feedback.status, "feedback");
     assert.deepEqual(feedback.dom_snapshot, queued.domSnapshot);
     assert.deepEqual(feedback.prompts, before);
-    assert.deepEqual(JSON.parse(await readFile(stateFile, "utf8")).sessions[key].chat, beforeState.chat);
+    // This delivery reached the agent, so it is the one that counts as Seen.
+    assert.deepEqual(
+      JSON.parse(await readFile(stateFile, "utf8")).sessions[key].chat.map((entry) => entry.delivered_seq),
+      [2, 2],
+    );
   } finally {
     SessionStore.prototype.takeFeedback = originalTakeFeedback;
     await server.close();
@@ -5563,12 +5570,18 @@ test("a disconnect during event-driven feedback take requeues the batch without 
       } finally {
         await afterRestorePresence.close();
       }
+      // The restore re-appended nothing and took the failed take's Seen stamps off again.
+      assert.deepEqual(JSON.parse(await readFile(stateFile, "utf8")).sessions[key].chat, beforeState.chat);
       const next = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`);
       const feedback = await next.json();
       assert.equal(feedback.status, "feedback");
       assert.equal(feedback.dom_snapshot, queued.domSnapshot);
       assert.deepEqual(feedback.prompts, [queued.prompts[0]]);
-      assert.deepEqual(JSON.parse(await readFile(stateFile, "utf8")).sessions[key].chat, beforeState.chat);
+      // This delivery reached the agent, so it is the one that counts as Seen.
+      assert.deepEqual(
+        JSON.parse(await readFile(stateFile, "utf8")).sessions[key].chat.map((entry) => entry.delivered_seq),
+        [2],
+      );
     } finally {
       await presence.close();
     }
@@ -6548,6 +6561,66 @@ test("the live transcript carries rendered html for agent replies and never for 
     // The page bootstraps the same transcript, so a reload renders structure without a live event.
     const page = await fetch(`${base}/session/${opened.key}`).then((response) => response.text());
     assert.match(page, /"html":"\\u003cp\\u003eDone\.\\u003c\/p\\u003e\\u003cul\\u003e/);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("chat-sync stamps a note seen when a poll takes it, working when the artifact changes, and done on reply", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body><h1>Hello</h1></body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const open = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const { key } = await open.json();
+    const stream = await startEventStream(base, key, "chat-sync");
+    try {
+      assert.deepEqual((await stream.next()).chat, [], "the connect snapshot carries the empty transcript");
+
+      const submitted = await fetch(`${base}/api/${key}/prompts`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: base },
+        body: JSON.stringify({ prompts: [{ prompt: "Make it blue", tag: "message", selector: "body", text: "" }] }),
+      });
+      assert.equal(submitted.status, 200);
+      const sent = await stream.next();
+      assert.equal(sent.chat.length, 1);
+      assert.equal("delivered_at" in sent.chat[0], false, "a send is not a delivery");
+
+      const poll = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`);
+      const feedback = await poll.json();
+      assert.equal(feedback.status, "feedback");
+      assert.equal("delivery_seq" in feedback, false, "the poll response carries no stamp bookkeeping");
+      const seen = await stream.next();
+      assert.ok(seen.chat[0].delivered_at, "the take stamps the note seen");
+      assert.equal("working_at" in seen.chat[0], false);
+      assert.ok(seen.chat_revision > sent.chat_revision);
+
+      await writeFile(artifact, "<!doctype html><html><body><h1 style='color:blue'>Hello</h1></body></html>");
+      const working = await stream.next();
+      assert.ok(working.chat[0].working_at, "an artifact change after delivery stamps working");
+      assert.equal("done_at" in working.chat[0], false);
+
+      const replied = await fetch(`${base}/api/${key}/agent-reply`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "It is blue now." }),
+      });
+      assert.equal(replied.status, 200);
+      const done = await stream.next();
+      assert.ok(done.chat[0].done_at, "the reply stamps the note done");
+      assert.equal(done.chat[1].role, "agent");
+      assert.equal(done.chat[0].done_at, done.chat[1].at);
+    } finally {
+      await stream.close();
+    }
   } finally {
     await server.close();
     await rm(dir, { recursive: true, force: true });
