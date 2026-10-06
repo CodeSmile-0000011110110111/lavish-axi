@@ -2605,6 +2605,14 @@ export function createArtifactSdk(
         isInteractiveControl(event.target)
       )
         return;
+      // Ctrl/Cmd-click on a link follows it (the browser opens a new tab) instead of annotating,
+      // so links stay usable without leaving annotate mode. Checked before the queued-note branch
+      // so the modifier always wins, and it clears a pending text-selection swallow so the next
+      // plain click is not eaten.
+      if ((event.ctrlKey || event.metaKey) && /** @type {Element} */ (event.target)?.closest?.("a[href]")) {
+        ignoreNextClick = false;
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       if (ignoreNextClick) {
