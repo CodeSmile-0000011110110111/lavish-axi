@@ -1189,6 +1189,33 @@ body.lavish {
 .bubble-text {
   white-space: pre-wrap;
 }
+/* A user bubble, queued or sent, is one row: anchor chip, the words on one line with an
+   ellipsis, then the label. The full words and the anchor's excerpt are on hover. */
+.bubble-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+.bubble-row .anchor-kind {
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bubble-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bubble .bubble-row small {
+  flex: 0 0 auto;
+  margin: 0 0 0 auto;
+}
 /* Consecutive items from one send sit closer, so a batch reads as a group. */
 .bubble.user + .bubble.user {
   margin-top: -4px;
@@ -1210,11 +1237,6 @@ body.lavish {
   justify-content: flex-end;
   align-items: center;
   gap: 8px;
-}
-.bubble.queued .queued-summary {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .bubble.queued:not(.editing) {
   cursor: pointer;

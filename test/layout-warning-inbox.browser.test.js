@@ -492,17 +492,19 @@ test("a live reload preserves the review context Lavish owns", { skip: !runBrows
       "chrome-devtools-axi",
       [
         "eval",
-        '() => { const bubble = document.querySelector(".bubble.queued"); const excerpt = bubble.querySelector(".anchor-excerpt"); const scroll = document.getElementById("panelScroll"); const chat = document.getElementById("chatLog"); return JSON.stringify({ text: bubble.querySelector(".bubble-text").textContent, borderStyle: getComputedStyle(bubble).borderStyle, excerptWhiteSpace: getComputedStyle(excerpt).whiteSpace, excerptHeight: excerpt.getBoundingClientRect().height, excerptLineHeight: parseFloat(getComputedStyle(excerpt).lineHeight), scrollOverflowY: getComputedStyle(scroll).overflowY, emptyCopyDisplay: getComputedStyle(chat, "::before").display }); }',
+        '() => { const bubble = document.querySelector(".bubble.queued"); const row = bubble.querySelector(".bubble-row"); const text = bubble.querySelector(".bubble-text"); const scroll = document.getElementById("panelScroll"); const chat = document.getElementById("chatLog"); return JSON.stringify({ text: text.textContent, rowCount: bubble.children.length, chip: row.querySelector(".anchor-kind").textContent, borderStyle: getComputedStyle(bubble).borderStyle, textWhiteSpace: getComputedStyle(text).whiteSpace, rowHeight: row.getBoundingClientRect().height, fontSize: parseFloat(getComputedStyle(text).fontSize), scrollOverflowY: getComputedStyle(scroll).overflowY, emptyCopyDisplay: getComputedStyle(chat, "::before").display }); }',
       ],
       chromeEnv,
     );
     const geometry = JSON.parse(JSON.parse(queuedNote.match(/result:\s*("(?:[^"\\]|\\.)*")/s)[1]));
     assert.equal(geometry.text, "Shorten this to one sentence");
     assert.equal(geometry.borderStyle, "dashed");
-    assert.equal(geometry.excerptWhiteSpace, "nowrap");
+    assert.equal(geometry.rowCount, 1, "the queued note is one row");
+    assert.equal(geometry.chip, "<p>");
+    assert.equal(geometry.textWhiteSpace, "nowrap");
     assert.equal(geometry.scrollOverflowY, "auto");
     assert.equal(geometry.emptyCopyDisplay, "none");
-    assert.ok(geometry.excerptHeight <= geometry.excerptLineHeight + 1, "the anchor excerpt stays on one line");
+    assert.ok(geometry.rowHeight < 2 * geometry.fontSize, `the queued row is one line: ${JSON.stringify(geometry)}`);
   } finally {
     run(process.execPath, ["bin/lavish-axi.js", "stop", "--port", String(port)], lavishEnv, 15_000);
     run("chrome-devtools-axi", ["stop"], chromeEnv);

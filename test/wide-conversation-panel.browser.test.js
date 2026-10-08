@@ -210,6 +210,8 @@ test(
           text: text.textContent,
           title: text.title,
           height: text.getBoundingClientRect().height,
+          rowCount: bubble.children.length,
+          rowHeight: text.closest(".bubble-row").getBoundingClientRect().height,
           fontSize: parseFloat(getComputedStyle(text).fontSize),
           truncated: text.scrollWidth > text.clientWidth,
           bubbleInsidePanel: bubble.getBoundingClientRect().right <= panel.right && bubble.getBoundingClientRect().left >= panel.left,
@@ -220,6 +222,11 @@ test(
       assert.ok(
         queuedRow.height < 2 * queuedRow.fontSize,
         `the queued answer is one line: ${JSON.stringify(queuedRow)}`,
+      );
+      assert.equal(queuedRow.rowCount, 1, "the queued bubble holds one row");
+      assert.ok(
+        queuedRow.rowHeight < 2 * queuedRow.fontSize,
+        `the queued row is one line: ${JSON.stringify(queuedRow)}`,
       );
       assert.equal(queuedRow.truncated, true, "the long answer ends in an ellipsis inside the 360px panel");
       assert.equal(queuedRow.bubbleInsidePanel, true);
