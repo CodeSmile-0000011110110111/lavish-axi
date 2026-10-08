@@ -119,7 +119,6 @@ const panelHead = /** @type {HTMLDivElement} */ (document.getElementById("panelH
 const panelSummary = /** @type {HTMLSpanElement} */ (document.getElementById("panelSummary"));
 const panelToggle = /** @type {HTMLButtonElement} */ (document.getElementById("panelToggle"));
 const conversationToggle = /** @type {HTMLButtonElement} */ (document.getElementById("conversationToggle"));
-const conversationStatus = /** @type {HTMLSpanElement} */ (document.getElementById("conversationStatus"));
 const panelScrim = /** @type {HTMLDivElement} */ (document.getElementById("panelScrim"));
 const sendButton = /** @type {HTMLButtonElement} */ (document.getElementById("send"));
 const sendAndEndButton = /** @type {HTMLButtonElement} */ (document.getElementById("sendAndEnd"));
@@ -617,6 +616,33 @@ function userBubbleTextHtml(entry, text) {
   return displayText ? '<div class="bubble-text">' + escapeHtml(displayText) + "</div>" : "";
 }
 
+// `window.lavish.queuePrompt(text, { data })` appends its data to the prompt under this heading
+// (src/artifact-sdk.js). test/artifact-sdk-bundle.test.js pins the SDK side of it.
+const CONTEXT_DATA_HEADING = "\n\nContext data:\n";
+
+// A queued note's one-line text: its words before any Context data block, whitespace collapsed.
+// A note that is only a data block names the block.
+function queuedSummaryText(promptText) {
+  const body = String(promptText || "");
+  const cut = body.indexOf(CONTEXT_DATA_HEADING);
+  const words = (cut === -1 ? body : body.slice(0, cut)).replace(/\s+/g, " ").trim();
+  return words || (cut === -1 ? "" : "Context data");
+}
+
+// The queued bubble's text is one line, so a run of board answers stays one row each; the whole
+// prompt, data block included, is on hover.
+function queuedBubbleTextHtml(prompt) {
+  const summary = queuedSummaryText(prompt.prompt) || attachmentOnlyText(prompt);
+  if (!summary) return "";
+  return (
+    '<div class="bubble-text queued-summary" title="' +
+    escapeHtml(String(prompt.prompt || summary)) +
+    '">' +
+    escapeHtml(summary) +
+    "</div>"
+  );
+}
+
 // A queued note is the user bubble in its not-yet-sent state: dashed, labelled Queued (Sending
 // while its batch is in flight), and editable and removable until then. It settles in place as a
 // sent bubble once the server's transcript carries it, so nothing moves between regions.
@@ -640,7 +666,7 @@ function queuedBubbleHtml(prompt, index) {
     REMOVE_ICON_SVG +
     "</button></small>" +
     anchorHtml(promptAnchor(prompt)) +
-    userBubbleTextHtml(prompt, prompt.prompt) +
+    queuedBubbleTextHtml(prompt) +
     bubbleAttachmentsHtml(prompt) +
     "</div>"
   );
@@ -1180,7 +1206,6 @@ function setHandoffSuperseded(visible) {
   const wasHidden = !handoffBanner || handoffBanner.hidden;
   if (handoffBanner) handoffBanner.hidden = ended || !visible;
   if (visible && !ended && wasHidden) revealConversation();
-  renderConversationStatus();
 }
 
 // The server this page was connected to went away. What is true beyond that depends on why, so
@@ -1207,7 +1232,6 @@ function setChromeOutdated(visible, reason = chromeOutdatedReason) {
   const wasHidden = !outdatedBanner || outdatedBanner.hidden;
   if (outdatedBanner) outdatedBanner.hidden = ended || !visible;
   if (visible && !ended && wasHidden) revealConversation();
-  renderConversationStatus();
 }
 
 function setReviewState(state) {
@@ -1321,9 +1345,8 @@ const sheetMedia = typeof window.matchMedia === "function" ? window.matchMedia(M
 // The user's intent, kept across a chrome reload so a live-reload or server upgrade does not drop
 // them back onto a closed dock mid-conversation.
 let sheetOpen = readSheetOpen();
-// The latest agent reply that landed while the conversation was out of view (phone sheet closed,
-// or desktop sidebar hidden): the dock or the toolbar reports it until the user shows the
-// conversation, so a reply never arrives silently behind the artifact.
+// The latest agent reply that landed while the sheet was closed: the dock previews it until the
+// user opens the sheet, so a reply never arrives silently behind the artifact.
 let unreadAgentReply = "";
 /** @type {{ pointerId: any, startY: number, moved: boolean } | null} */
 let sheetDrag = null;
@@ -1356,7 +1379,6 @@ function setConversationHidden(hidden) {
   } catch {
     // Storage refused only stops the preference surviving a reload.
   }
-  if (!conversationHidden) unreadAgentReply = "";
   applySheetState();
   if (!isConversationHidden()) scrollPanelToBottom();
 }
@@ -1368,23 +1390,6 @@ function revealConversation() {
 }
 
 conversationToggle.addEventListener("click", () => setConversationHidden(!conversationHidden));
-
-// While the sidebar is hidden the toolbar carries what the dock carries on a phone, plus the
-// notices that would otherwise sit unseen in the hidden composer.
-function renderConversationStatus() {
-  const hidden = isConversationHidden();
-  const parts = [];
-  if (hidden) {
-    if (!ended && handoffBanner && !handoffBanner.hidden) parts.push("Open in another tab");
-    if (!ended && outdatedBanner && !outdatedBanner.hidden) parts.push("Server notice");
-    const summary = sheetSummary();
-    parts.push(summary.unread ? "New reply" : summary.text);
-  }
-  const status = parts.join(" · ");
-  conversationStatus.textContent = status;
-  conversationStatus.title = status;
-  conversationStatus.hidden = !hidden;
-}
 
 function readSheetOpen() {
   try {
@@ -1455,7 +1460,6 @@ function sheetSummary() {
 }
 
 function renderSheetSummary() {
-  renderConversationStatus();
   const summary = sheetSummary();
   panelSummary.textContent = summary.text;
   panelSummary.classList.toggle("is-accent", summary.accent);
@@ -1473,7 +1477,7 @@ function pulseSheetDock() {
 }
 
 function noteAgentReply(text) {
-  if (isMobileSheet() ? sheetOpen : !conversationHidden) return;
+  if (!isMobileSheet() || sheetOpen) return;
   unreadAgentReply = String(text || "");
   renderSheetSummary();
   pulseSheetDock();

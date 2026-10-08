@@ -97,9 +97,7 @@
   --shadow-floating: 0 20px 70px rgba(0, 0, 0, 0.35);
   --bar-h: 56px;
   --bar-pad: var(--space-8);
-  /* The side panel keeps a 360px floor and grows with the window, so wide screens give the
-     conversation room as well as the artifact. */
-  --panel-w: clamp(360px, 30vw, 640px);
+  --panel-w: 360px;
   --composer-min-h: 160px;
   --ease: cubic-bezier(0.2, 0.6, 0.2, 1);
   --dur-fast: 120ms;
@@ -218,25 +216,6 @@ body.lavish {
 .annotate-switch[aria-pressed="true"] .switch-knob {
   left: 16px;
   background: var(--accent-ink);
-}
-.conversation-control {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  min-width: 0;
-  max-width: 240px;
-}
-.conversation-status {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--text-xs);
-  color: var(--accent);
-}
-.conversation-status[hidden] {
-  display: none;
 }
 /* The hidden sidebar gives its column back to the artifact. Scoped to the side-by-side layout so
    the phone dock can never disappear, even for the moment before the client re-derives the
@@ -1232,6 +1211,11 @@ body.lavish {
   align-items: center;
   gap: 8px;
 }
+.bubble.queued .queued-summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .bubble.queued:not(.editing) {
   cursor: pointer;
 }
@@ -1725,7 +1709,7 @@ body.layout-gate-active iframe#artifact {
    of covering the composer, and every edge that can meet a notch or home indicator pads by the
    matching safe-area inset. */
 @media (max-width: 860px) {
-  .conversation-control {
+  .conversation-switch {
     display: none;
   }
   :root {

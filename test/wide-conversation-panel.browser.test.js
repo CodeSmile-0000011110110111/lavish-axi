@@ -8,9 +8,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 // The side-by-side layout, measured in a real browser: the artifact and the conversation panel
-// share the whole window at every width, the panel grows with the window between its 360px floor
-// and 640px ceiling, the toolbar Conversation switch hides the panel so the artifact takes the
-// full width, that choice survives a reload, and the phone dock ignores it.
+// share the whole window at every width, the panel is a fixed 360px column, the toolbar
+// Conversation switch hides the panel so the artifact takes the full width without the switch
+// moving, that choice survives a reload, and the phone dock ignores it.
 const runBrowserE2e = process.env.LAVISH_AXI_BROWSER_E2E === "1";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -76,7 +76,6 @@ const GEOMETRY = `() => {
     toggle: rect(toggle),
     toggleVisible: toggle.getClientRects().length > 0,
     pressed: toggle.getAttribute("aria-pressed"),
-    status: document.getElementById("conversationStatus").hidden ? null : document.getElementById("conversationStatus").textContent,
     textarea: rect(document.getElementById("chatInput")),
     draft: document.getElementById("chatInput").value,
     sheetOpen: document.body.classList.contains("sheet-open"),
@@ -149,7 +148,6 @@ test(
       assert.equal(g.panelDisplayed, true);
       assert.equal(g.panelInert, false);
       assert.equal(g.pressed, "true");
-      assert.equal(g.status, null);
       assert.equal(g.panel.width, panelWidth, `panel width at ${g.viewport.width}px: ${JSON.stringify(g.panel)}`);
       assert.equal(g.frame.left, 0);
       assert.equal(g.frame.right, g.panel.left, "artifact and panel meet");
@@ -158,7 +156,7 @@ test(
       assert.equal(g.documentScrollable, false);
     }
 
-    function assertHidden(g) {
+    function assertHidden(g, shownToggle) {
       assert.equal(g.panelDisplayed, false);
       assert.equal(g.panelInert, true);
       assert.equal(g.pressed, "false");
@@ -166,7 +164,7 @@ test(
       assert.equal(g.frame.width, g.viewport.width, "the artifact takes the whole window width");
       assert.equal(g.toggleVisible, true, "the switch to bring the panel back stays in the toolbar");
       assert.ok(g.toggle.right <= g.viewport.width && g.toggle.bottom <= 56, JSON.stringify(g.toggle));
-      assert.ok(g.status, "the toolbar reports the conversation while it is hidden");
+      if (shownToggle) assert.deepEqual(g.toggle, shownToggle, "hiding the panel leaves the switch where it was");
       assert.equal(g.documentScrollable, false);
     }
 
@@ -183,13 +181,49 @@ test(
       // ---- Fluid side-by-side layout ----
       for (const [viewport, panelWidth] of [
         ["961x700x1", 360],
-        ["1440x1000x1", 432],
-        ["2560x1200x1", 640],
+        ["1440x1000x1", 360],
+        ["2560x1200x1", 360],
       ]) {
         emulate(viewport);
         open(url);
         assertSideBySide(geometry(), panelWidth);
       }
+
+      // ---- A queued board answer is one row ----
+      // The tab's stored queue is what the chrome renders on load, so seeding it stands in for a
+      // board calling `window.lavish.queuePrompt(text, { data })`.
+      const key = url.match(/\/session\/([^/?#]+)/)?.[1];
+      assert.ok(key, url);
+      const answer = "R1-Q5: B, keep the fixed sidebar width and show every queued answer on one row of the panel";
+      const queuedPrompt = answer + "\n\nContext data:\n" + JSON.stringify({ question: "R1-Q5", choice: "B" }, null, 2);
+      evaluate(
+        `() => { sessionStorage.setItem(${JSON.stringify("lavish-axi:queued:" + key)}, ${JSON.stringify(
+          JSON.stringify([{ uid: "", prompt: queuedPrompt, selector: "", tag: "message", text: "" }]),
+        )}); return "ok"; }`,
+      );
+      open(url);
+      const queuedRow = evaluate(`() => {
+        const text = document.querySelector("#queuedLog .queued-summary");
+        const bubble = text.closest(".bubble");
+        const panel = document.getElementById("panel").getBoundingClientRect();
+        return JSON.stringify({
+          text: text.textContent,
+          title: text.title,
+          height: text.getBoundingClientRect().height,
+          fontSize: parseFloat(getComputedStyle(text).fontSize),
+          truncated: text.scrollWidth > text.clientWidth,
+          bubbleInsidePanel: bubble.getBoundingClientRect().right <= panel.right && bubble.getBoundingClientRect().left >= panel.left,
+        });
+      }`);
+      assert.equal(queuedRow.text, answer);
+      assert.equal(queuedRow.title, queuedPrompt);
+      assert.ok(
+        queuedRow.height < 2 * queuedRow.fontSize,
+        `the queued answer is one line: ${JSON.stringify(queuedRow)}`,
+      );
+      assert.equal(queuedRow.truncated, true, "the long answer ends in an ellipsis inside the 360px panel");
+      assert.equal(queuedRow.bubbleInsidePanel, true);
+      evaluate(`() => { sessionStorage.removeItem(${JSON.stringify("lavish-axi:queued:" + key)}); return "ok"; }`);
 
       // ---- The comment card in the artifact ----
       emulate("1440x1000x1");
@@ -208,13 +242,15 @@ test(
       // ---- Hide and restore ----
       open(url);
       evaluate('() => { document.getElementById("chatInput").value = "Keep this draft"; return "ok"; }');
+      const shownToggle = geometry().toggle;
       clickToggle();
       let g = geometry();
-      assertHidden(g);
+      assertHidden(g, shownToggle);
       assert.equal(g.draft, "Keep this draft");
       clickToggle();
       g = geometry();
-      assertSideBySide(g, 432);
+      assertSideBySide(g, 360);
+      assert.deepEqual(g.toggle, shownToggle, "showing the panel leaves the switch where it was");
       assert.equal(g.draft, "Keep this draft");
 
       // The hidden state survives a reload of the review page.
@@ -236,7 +272,7 @@ test(
       emulate("1440x1000x1");
       assertHidden(geometry());
       clickToggle();
-      assertSideBySide(geometry(), 432);
+      assertSideBySide(geometry(), 360);
     } finally {
       run(process.execPath, ["bin/lavish-axi.js", "stop", "--port", String(port)], lavishEnv, 15_000);
       run("chrome-devtools-axi", ["stop"], chromeEnv);
