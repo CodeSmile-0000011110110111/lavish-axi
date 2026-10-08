@@ -1212,12 +1212,57 @@ export function createArtifactSdk(
     setMermaidFrozen(annotationMode);
   }
 
+  /** Coerce a queuePrompt body to plain text. Never emit the useless "[object Object]". */
+  function promptBodyToString(value) {
+    if (value === null || value === undefined) return "";
+    if (typeof value === "string") return value;
+    if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value);
+    if (typeof value === "object") {
+      if (typeof value.prompt === "string") return value.prompt;
+      if (typeof value.text === "string") return value.text;
+      if (typeof value.message === "string") return value.message;
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return "";
+      }
+    }
+    const coerced = String(value);
+    return coerced === "[object Object]" ? "" : coerced;
+  }
+
+  /**
+   * Boards often call queuePrompt({ text, queueKey, element, data }) with one object.
+   * The historical API is queuePrompt(string, options). Accept both without losing text.
+   */
+  function normalizeQueuePromptArgs(prompt, options) {
+    const opts = options && typeof options === "object" ? { ...options } : {};
+    let body = prompt;
+    if (prompt !== null && typeof prompt === "object" && !Array.isArray(prompt)) {
+      const bag = prompt;
+      body = Object.hasOwn(bag, "prompt")
+        ? bag.prompt
+        : Object.hasOwn(bag, "text")
+          ? bag.text
+          : Object.hasOwn(bag, "message")
+            ? bag.message
+            : "";
+      const mergeKeys = ["element", "uid", "selector", "tag", "text", "target", "data", "attachments", "queueKey"];
+      for (const key of mergeKeys) {
+        if (Object.hasOwn(bag, key) && !Object.hasOwn(opts, key)) opts[key] = bag[key];
+      }
+    }
+    return { body: promptBodyToString(body), options: opts };
+  }
+
   function queuePrompt(prompt, options = {}) {
+    const normalized = normalizeQueuePromptArgs(prompt, options);
+    options = normalized.options;
     const originElement = options.element || document.activeElement || document.body;
     /** @type {{ uid: string, prompt: string, selector: string, tag: string, text: string, target?: unknown, attachments?: Array<{ id: string, name?: string }>, _lavishQueueKey?: string }} */
     const item = {
       ...context(originElement),
-      prompt: String(prompt || ""),
+      prompt: normalized.body,
     };
     const queueKey = typeof deriveQueueKey === "function" ? deriveQueueKey(originElement, options) : "";
     if (queueKey) item._lavishQueueKey = String(queueKey);
@@ -1225,7 +1270,7 @@ export function createArtifactSdk(
     if (options.uid) item.uid = String(options.uid);
     if (options.selector) item.selector = String(options.selector);
     if (options.tag) item.tag = String(options.tag);
-    if (options.text) item.text = String(options.text);
+    if (options.text != null && options.text !== "") item.text = promptBodyToString(options.text);
     if (options.target) item.target = options.target;
     if (options.data) item.prompt += "\n\nContext data:\n" + JSON.stringify(options.data, null, 2);
     // Attach only the client-controllable fields (server-vetted id + display name);
