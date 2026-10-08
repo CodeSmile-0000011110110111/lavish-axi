@@ -5584,11 +5584,14 @@ test("a disconnect during immediate feedback take requeues the batch without wor
     socket.on("error", () => {});
     socket.destroy();
     releaseTake();
-    await new Promise((resolve) => setTimeout(resolve, 50));
 
+    // The server restores the batch and then releases the closed poll, which emits "waiting".
+    // Until that release the stream may still report "listening"; it must never report "working".
     const presence = await startPresenceStream(base, key);
     try {
-      assert.equal(await presence.next(), "waiting");
+      let state = await presence.next();
+      while (state === "listening") state = await presence.next();
+      assert.equal(state, "waiting");
     } finally {
       await presence.close();
     }
