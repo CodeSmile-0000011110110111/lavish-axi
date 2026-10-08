@@ -698,6 +698,13 @@ test("turning annotation mode off clears selection and floating card", () => {
   assert.match(js, /if \(!annotationMode\) closeCard\(\)/);
 });
 
+test("annotation card is 640px wide with a 129px minimum textarea height", () => {
+  const js = createSdkJs("abc");
+
+  assert.match(js, /\.lavish-annotation-card\{position:fixed;width:min\(640px,calc\(100vw - 24px\)\);/);
+  assert.match(js, /\.lavish-annotation-card textarea\{width:100%;min-height:129px;/);
+});
+
 test("annotation card title renders selected tag as an html element name", () => {
   const js = createSdkJs("abc");
 
