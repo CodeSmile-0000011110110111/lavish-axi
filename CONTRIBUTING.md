@@ -11,12 +11,17 @@ Pushing through it runs an AI-driven review/test/lint pipeline in an isolated wo
 
 A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails if the body is missing the deterministic signature that no-mistakes writes.
 It also requires the machine-readable pipeline attestation that no-mistakes >= 1.46.0 writes next to that signature: the `review`, `test`, and `document` steps must all be recorded as `completed`, and the attested `head_sha` must be the PR's current head.
-So pushing a commit after the pipeline ran turns the check red until you `git push no-mistakes` again and the body is rewritten for the new head.
+The check runs on opened, edited, synchronize, and reopened, including pushed commits. That is safe because no-mistakes #994 writes the attestation before it pushes, so a pipeline-pushed head already has a matching body; a commit pushed outside the pipeline still fails until you `git push no-mistakes` again so the body carries an attestation for the new head.
 The release and dependency bots are exempt so their automation keeps working, but regular contributor PRs without the signature and a current attestation will not be reviewed or merged.
+
+`.github/workflows/no-mistakes-required.yml` is a thin caller of the shared `kunchenguid/no-mistakes` composite action, pinned to an immutable commit SHA and never `@main`.
+Enforcement logic and its tests live upstream. Change them there, and bump this repo's pin in a deliberate separate PR.
+This repo still owns its `on:`, `paths-ignore`, `concurrency`, `permissions`, job name, and author-exemption `if:`.
 
 ## Workflow
 
-Fork routing requires `no-mistakes` v1.30.1 or newer.
+Workflow requires `no-mistakes` v1.46.0 or newer.
+Earlier versions can route pushes to a fork, but they do not write the pipeline attestation required by this repository's PR gate.
 
 1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent repo (`git@github.com:kunchenguid/lavish-axi.git`).
 2. Create a branch and make your changes.
@@ -40,16 +45,6 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 - Do not reformat repo-provided `.agents/` skill content; `.prettierignore` excludes it intentionally.
 - Do not hand-edit `CHANGELOG.md` or `.release-please-manifest.json`.
 - User-facing telemetry docs should stay minimal: anonymous usage telemetry, no sensitive content, and `LAVISH_AXI_TELEMETRY=0` opt-out.
-
-## Conversation browser tests
-
-The conversation suites are opt-in and use `chrome-devtools-axi` by default:
-
-```sh
-LAVISH_AXI_BROWSER_E2E=1 node --test test/mobile-conversation-sheet.browser.test.js test/wide-conversation-panel.browser.test.js
-```
-
-Set `LAVISH_AXI_CHROME_PATH` to a Chrome executable to run these two suites directly in an isolated headless browser. This override does not install Chrome or change the installed CLI. The wide suite checks 1440px, 960px, and 861px CSS viewports and transitions to the phone sheet; viewport emulation does not test native browser zoom controls.
 
 ## Questions
 

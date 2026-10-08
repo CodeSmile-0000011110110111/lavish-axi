@@ -15,6 +15,17 @@ import {
   serializeLayoutWarnings,
 } from "./layout-warnings.js";
 import { AsyncMutex } from "./async-mutex.js";
+import {
+  boundStoredChat,
+  chatEntryForPrompt,
+  collectChatAckIds,
+  markPreReceipt,
+  normalizePromptId,
+  stampDelivered,
+  stampDone,
+  stampWorking,
+  unstampDelivery,
+} from "./chat-messages.js";
 import { normalizeMermaidNodeTarget } from "./mermaid-node.js";
 import { EXCALIDRAW_SCENE_TARGET_TYPE, normalizeExcalidrawSceneTarget } from "./whiteboard-core.js";
 
@@ -53,8 +64,30 @@ export class SessionStore {
     // One mutex serializes every state.json read-modify-write and the server's
     // attachment disk lifecycle sections through runExclusive.
     this.lock = new AsyncMutex();
+    // Hot copies of `session.artifact_load`, which is the durable record. A process that did not
+    // issue the load reads it back through `#activeArtifactLoad` the first time it is asked for.
     this.artifactLoads = new Map();
     this.chromeLoadContexts = new Map();
+  }
+
+  // The one reader of the active load. It exists because the load outlives the process that
+  // issued it: an upgrade restart replaces the server under a reviewer who never asked for it,
+  // and a load this store merely forgot is not a load that ended. Whether a token is still
+  // current is decided by `beginArtifactLoad` alone - nothing else may retire one.
+  #activeArtifactLoad(session) {
+    const cached = this.artifactLoads.get(session.key);
+    if (cached) return cached;
+    const restored = restoreArtifactLoad(session.artifact_load);
+    if (!restored) return undefined;
+    this.artifactLoads.set(session.key, restored);
+    // The handoff that owns this load is part of the same record. Restoring the load without it
+    // would hand the review to whichever tab re-handshakes first, so a restart would decide the
+    // single-reviewer question that only an explicit takeover is allowed to decide. A handoff
+    // this process has already issued is newer than the record and always wins.
+    if (!this.chromeLoadContexts.has(session.key)) {
+      this.chromeLoadContexts.set(session.key, restored.handoffToken);
+    }
+    return restored;
   }
 
   async listSessions() {
@@ -104,6 +137,9 @@ export class SessionStore {
       // must never silently drop unresolved warnings the user has not triaged yet.
       layout_warnings: normalizeStoredWarnings(existing.layout_warnings),
       artifact_revision: normalizeRevision(existing.artifact_revision),
+      // The reviewer's open tab is holding this token, so reopening the artifact must not retire
+      // it: only a newer `beginArtifactLoad` retires a load.
+      artifact_load: normalizeStoredArtifactLoad(existing.artifact_load),
       artifact_failures: Array.isArray(existing.artifact_failures) ? existing.artifact_failures : [],
       // Carried across a reopen on purpose: this list is what keeps a just-delivered
       // attachment out of the sweeper's reach, and re-opening the artifact during the
@@ -113,6 +149,18 @@ export class SessionStore {
       delivered_attachments: Array.isArray(existing.delivered_attachments) ? existing.delivered_attachments : [],
       dom_snapshot: existing.dom_snapshot || "",
       chat: existing.chat || [],
+      chat_revision: normalizeRevision(existing.chat_revision),
+      // Compact prompt_id acks for bubbles evicted by the stored-chat byte bound. Reopening
+      // must keep them: they are the settlement/dedup source once the visible entry is gone.
+      chat_ack_ids: Array.isArray(existing.chat_ack_ids) ? existing.chat_ack_ids : [],
+      // Counts the takes that stamped Seen on chat entries (docs/delivery-acks.md). Reset on reopen
+      // and a later restore could un-stamp an older take's entries, so it is carried like chat.
+      delivery_seq: normalizeRevision(existing.delivery_seq),
+      // The last take of the rounds that have ended. Reopening starts a new round: a note an ended
+      // round left at Seen stays Seen, because a later round's edit or reply is not about it.
+      closed_delivery_seq: normalizeRevision(
+        existing.status === "ended" ? existing.delivery_seq : existing.closed_delivery_seq,
+      ),
       updated_at: new Date().toISOString(),
     };
     state.sessions[key] = session;
@@ -150,7 +198,33 @@ export class SessionStore {
     // because restore re-enters the same trust boundary.
     const restoring = options.restore === true;
     const alreadyEnded = session.status === "ended";
-    const normalized = prompts.map(normalizePrompt);
+    // A session already ended by someone else (an agent's `lavish-axi end`, or the user in
+    // another tab) must not accept a further batch as if it were queued for delivery: no agent
+    // will ever poll it again, so a 200 here would be a promise the server cannot keep. This
+    // applies even to a batch that also requests `endSession` - a redundant end of an
+    // already-ended session is still a late batch nobody will read. Only `restore` is exempt,
+    // because it never originated a new POST: it replays a batch `takeFeedback` already
+    // accepted and removed, and its payload never sets `endSession`. A batch that ends a session
+    // that is not yet ended is unaffected, because `alreadyEnded` is false for that call.
+    if (alreadyEnded && !restoring) {
+      return { ended: true, ended_by: session.ended_by };
+    }
+    let normalized = prompts.map(normalizePrompt);
+    if (!restoring) {
+      const acknowledgedIds = new Set(
+        [
+          ...(session.chat || []).map((entry) => normalizePromptId(entry?.prompt_id)),
+          ...(session.chat_ack_ids || []).map((id) => normalizePromptId(id)),
+        ].filter(Boolean),
+      );
+      normalized = normalized.filter(({ prompt }) => {
+        const promptId = normalizePromptId(prompt.prompt_id);
+        if (!promptId) return true;
+        if (acknowledgedIds.has(promptId)) return false;
+        acknowledgedIds.add(promptId);
+        return true;
+      });
+    }
     const normalizedPrompts = normalized.map((entry) => entry.prompt);
     // Resolve every attachment BEFORE mutating anything. If any prompt's images
     // can't be fully honored - malformed, an unknown id, or over the per-prompt
@@ -166,7 +240,15 @@ export class SessionStore {
         else delete prompt.attachments;
       }
     }
+    // Nothing reached an agent, so the Seen stamps that take wrote come off again - only that
+    // take's: a note queued in the window is unstamped already and is delivered by the next take.
+    // This holds whether or not the batch can be put back: a refused restore loses the prompts, and
+    // a note left Seen would then claim a delivery that never happened.
+    const deliverySeq = restoring ? normalizeRevision(payload.delivery_seq) : 0;
+    const unstamped = deliverySeq > 0 && unstampDelivery(session.chat, deliverySeq);
+    if (unstamped) session.chat_revision = normalizeRevision(session.chat_revision) + 1;
     if (rejected.length) {
+      if (unstamped) await this.writeState(state);
       return {
         rejected: rejected.slice(0, MAX_REPORTED_ATTACHMENT_REJECTIONS),
         caps: {
@@ -222,14 +304,18 @@ export class SessionStore {
       }
     }
     session.layout_warnings = warnings;
+    // Every accepted prompt with something to display joins the transcript, not only composer
+    // messages: the notes a reviewer sends are the half of the conversation the panel used to
+    // lose on send.
     const userMessages = restoring
       ? []
-      : acceptedPrompts
-          .filter((prompt) => prompt.tag === "message" && prompt.prompt)
-          .map((prompt) => ({ role: "user", text: prompt.prompt, at: new Date().toISOString() }));
+      : acceptedPrompts.map((prompt) => chatEntryForPrompt(prompt, at)).filter(Boolean);
     const existingPrompts = Array.isArray(session.prompts) ? session.prompts : [];
-    session.prompts = restoring ? [...acceptedPrompts, ...existingPrompts] : [...existingPrompts, ...acceptedPrompts];
+    const storedPrompts = restoring ? acceptedPrompts : acceptedPrompts.map(agentFacingPrompt);
+    session.prompts = restoring ? [...storedPrompts, ...existingPrompts] : [...existingPrompts, ...storedPrompts];
     session.chat = [...(session.chat || []), ...userMessages];
+    applyTranscriptBound(session);
+    if (userMessages.length > 0) session.chat_revision = normalizeRevision(session.chat_revision) + 1;
     if (restoring) {
       const restoredFailures = Array.isArray(payload.artifact_failures)
         ? JSON.parse(JSON.stringify(payload.artifact_failures))
@@ -252,7 +338,7 @@ export class SessionStore {
     if (shouldEndSession) session.ended_by = "user";
     session.updated_at = new Date().toISOString();
     await this.writeState(state);
-    return session;
+    return { ...session, fresh_feedback: !restoring && acceptedPrompts.length > 0 };
   }
 
   async issueReviewerHandoff(key) {
@@ -264,7 +350,7 @@ export class SessionStore {
       }
       const chromeLoadToken = crypto.randomBytes(24).toString("base64url");
       this.chromeLoadContexts.set(key, chromeLoadToken);
-      const activeLoad = this.artifactLoads.get(key);
+      const activeLoad = this.#activeArtifactLoad(session);
       return {
         session,
         chrome_load_token: chromeLoadToken,
@@ -288,8 +374,11 @@ export class SessionStore {
       const normalizedRequestSequence =
         Number.isSafeInteger(parsedRequestSequence) && parsedRequestSequence > 0 ? parsedRequestSequence : 0;
       const normalizedHandoffToken = String(handoffToken || "");
+      // Read the load first: restoring it is also what re-establishes the handoff that owns it,
+      // so a reviewer whose server was replaced is not answered `no-handoff` for holding a
+      // capability that is still the current one.
+      const activeLoad = this.#activeArtifactLoad(session);
       const activeHandoffToken = this.chromeLoadContexts.get(key) || "";
-      const activeLoad = this.artifactLoads.get(key);
       const staleResult = (status) => ({
         session,
         stale: status,
@@ -322,14 +411,16 @@ export class SessionStore {
       }
       const artifactRevision = normalizeRevision(session.artifact_revision) + 1;
       const artifactLoadToken = crypto.randomBytes(24).toString("base64url");
-      this.artifactLoads.set(key, {
+      const load = {
         artifactRevision,
         artifactLoadToken,
         lastPassSequence: 0,
         requestId: normalizedRequestId,
         requestSequence: normalizedRequestSequence,
         handoffToken: normalizedHandoffToken,
-      });
+      };
+      this.artifactLoads.set(key, load);
+      session.artifact_load = serializeArtifactLoad(load);
       session.artifact_revision = artifactRevision;
       session.updated_at = new Date().toISOString();
       await this.writeState(state);
@@ -344,7 +435,7 @@ export class SessionStore {
       if (!session) {
         return null;
       }
-      const load = this.artifactLoads.get(key);
+      const load = this.#activeArtifactLoad(session);
       const revision = parseRevisionValue(artifactRevision);
       const valid = Boolean(
         load &&
@@ -375,7 +466,7 @@ export class SessionStore {
         return null;
       }
       const revision = normalizeRevision(session.artifact_revision);
-      const load = this.artifactLoads.get(key);
+      const load = this.#activeArtifactLoad(session);
       const artifactLoadToken = String(payload?.artifact_load_token || payload?.artifactLoadToken || "");
       const reportedRevision = parseDiagnosticRevision(payload);
       const passSequence = parsePassSequence(payload);
@@ -415,6 +506,11 @@ export class SessionStore {
         return { session, changed: false, warnings: serializeLayoutWarnings(warnings) };
       }
       session.layout_warnings = warnings;
+      // Ride along with a write this pass was already making. The pass fence is deliberately NOT
+      // worth a write of its own: a repeat pass that changes no warning must not rewrite
+      // state.json, and a fence restored one pass behind only re-admits a pass whose findings
+      // `applyDiagnosticPass` already treats as the same answer.
+      session.artifact_load = serializeArtifactLoad(load);
       session.updated_at = at;
       await this.writeState(state);
       return { session, changed: true, warnings: serializeLayoutWarnings(warnings) };
@@ -474,7 +570,7 @@ export class SessionStore {
       if (!session) {
         return null;
       }
-      const load = this.artifactLoads.get(key);
+      const load = this.#activeArtifactLoad(session);
       const artifactLoadToken = String(payload?.artifact_load_token || payload?.artifactLoadToken || "");
       const reportedRevision = parseDiagnosticRevision(payload);
       if (
@@ -538,12 +634,17 @@ export class SessionStore {
       if (prompts.length === 0 && artifactFailures.length === 0) {
         return alreadyEnded ? { status: "ended", ended_by: session.ended_by } : { status: "waiting" };
       }
+      // Seen (docs/delivery-acks.md): this take drains every pending prompt and `queuePrompts`
+      // shares this lock, so the user entries with no stamp are exactly this batch. The sequence
+      // rides on the result so a closed-poll restore can undo only this take's stamps.
+      const deliverySeq = normalizeRevision(session.delivery_seq) + 1;
       const result = {
         status: "feedback",
         dom_snapshot: session.dom_snapshot || "",
         prompts,
         ...(artifactFailures.length > 0 ? { artifact_failures: artifactFailures } : {}),
         ...(alreadyEnded ? { session_ended: true, ended_by: session.ended_by } : {}),
+        ...(prompts.length > 0 ? { delivery_seq: deliverySeq } : {}),
       };
       // Delivery clears pending prompts, so retain the attachment ids for a bounded
       // grace window while the polling agent opens the absolute paths it received.
@@ -567,6 +668,12 @@ export class SessionStore {
       const current = [...deliveredIds].map((id) => ({ id, at: deliveredNow }));
       const historyRoom = Math.max(0, MAX_DELIVERED_ATTACHMENTS - current.length);
       session.delivered_attachments = [...carried.slice(-historyRoom), ...current];
+      if (prompts.length > 0) {
+        session.delivery_seq = deliverySeq;
+        if (stampDelivered(session.chat, deliverySeq, new Date(deliveredNow).toISOString())) {
+          session.chat_revision = normalizeRevision(session.chat_revision) + 1;
+        }
+      }
       session.prompts = [];
       session.artifact_failures = [];
       session.pending_prompts = 0;
@@ -600,18 +707,39 @@ export class SessionStore {
     });
   }
 
-  async addAgentReply(key, text) {
+  async addAgentReply(key, text, { requireOpen = false } = {}) {
     return this.runExclusive(async () => {
       const state = await this.readState();
       const session = state.sessions[key];
       if (!session) {
         return null;
       }
-      session.chat = [
-        ...(session.chat || []),
-        { role: "agent", text: String(text || ""), at: new Date().toISOString() },
-      ];
-      session.updated_at = new Date().toISOString();
+      if (requireOpen && session.status === "ended") return session;
+      const at = new Date().toISOString();
+      // Done (docs/delivery-acks.md): the reply answers what the agent has seen. Stamped in the same
+      // write as the reply, with the reply's own time, and never on an entry no poll has delivered.
+      stampDone(session.chat, at, normalizeRevision(session.closed_delivery_seq));
+      session.chat = [...(session.chat || []), { role: "agent", text: String(text || ""), at }];
+      applyTranscriptBound(session);
+      session.chat_revision = normalizeRevision(session.chat_revision) + 1;
+      session.updated_at = at;
+      await this.writeState(state);
+      return session;
+    });
+  }
+
+  // Working (docs/delivery-acks.md): the artifact changed after a delivery, so the agent is acting on
+  // what it was handed. Returns the session when a stamp landed and null when there was nothing to
+  // stamp, in which case state.json is not rewritten - the watcher fires on every save.
+  async markWorking(key) {
+    return this.runExclusive(async () => {
+      const state = await this.readState();
+      const session = state.sessions[key];
+      if (!session) return null;
+      const at = new Date().toISOString();
+      if (!stampWorking(session.chat, at, normalizeRevision(session.closed_delivery_seq))) return null;
+      session.chat_revision = normalizeRevision(session.chat_revision) + 1;
+      session.updated_at = at;
       await this.writeState(state);
       return session;
     });
@@ -658,7 +786,25 @@ export class SessionStore {
     try {
       const raw = await readFile(this.file, "utf8");
       const parsed = JSON.parse(raw);
-      return { sessions: parsed.sessions || {} };
+      const state = { sessions: parsed.sessions || {} };
+      let changed = false;
+      for (const session of Object.values(state.sessions)) {
+        if (!session || typeof session !== "object") continue;
+        // A session the receipt code has never written has no `delivery_seq` key at all. Its user
+        // entries predate receipts, so they are marked out of the stamping rule once, here, on the
+        // one load path every operation shares (docs/delivery-acks.md). Persisted at once: the
+        // marker must exist before the first take, which may run without any upsert.
+        if (!("delivery_seq" in session)) {
+          session.delivery_seq = 0;
+          markPreReceipt(session.chat);
+          changed = true;
+        }
+        if (!applyTranscriptBound(session)) continue;
+        session.chat_revision = normalizeRevision(session.chat_revision) + 1;
+        changed = true;
+      }
+      if (changed) await this.writeState(state);
+      return state;
     } catch (error) {
       if (error && error.code === "ENOENT") {
         return { sessions: {} };
@@ -681,6 +827,20 @@ export function sessionKey(file) {
   return crypto.createHash("sha256").update(file).digest("hex").slice(0, 16);
 }
 
+function applyTranscriptBound(session) {
+  const originalChat = Array.isArray(session.chat) ? session.chat : [];
+  const { chat, evicted } = boundStoredChat(session.chat);
+  const chatChanged =
+    !Array.isArray(session.chat) ||
+    chat.length !== originalChat.length ||
+    chat.some((entry, index) => entry !== originalChat[index]);
+  session.chat = chat;
+  if (evicted.length === 0) return chatChanged;
+  const existingAckCount = Array.isArray(session.chat_ack_ids) ? session.chat_ack_ids.length : 0;
+  session.chat_ack_ids = collectChatAckIds(evicted, session.chat_ack_ids);
+  return chatChanged || session.chat_ack_ids.length !== existingAckCount;
+}
+
 // Returns `{ prompt, malformed }`: `malformed` is non-empty when the payload's
 // `attachments` field exists but cannot be honored as written, which fails the
 // whole batch rather than being normalized away (C4, see queuePrompts).
@@ -692,11 +852,22 @@ function normalizePrompt(prompt) {
     tag: String(prompt.tag || ""),
     text: String(prompt.text || ""),
   };
+  const promptId = normalizePromptId(prompt.prompt_id);
+  if (promptId) normalized.prompt_id = promptId;
   const target = normalizeTarget(prompt.target);
   if (target) normalized.target = target;
   const { refs, malformed } = normalizeAttachmentRefs(prompt.attachments);
   if (refs.length > 0) normalized.attachments = refs;
   return { prompt: normalized, malformed };
+}
+
+// Settlement identity is transcript-owned. The agent-facing prompt list must not carry it:
+// poll output stays the reviewer's words, and a restore replay never re-appends chat.
+function agentFacingPrompt(prompt) {
+  if (!prompt || typeof prompt !== "object" || prompt.prompt_id === undefined) return prompt;
+  const rest = { ...prompt };
+  delete rest.prompt_id;
+  return rest;
 }
 
 function layoutWarningPromptIds(prompt) {
@@ -842,6 +1013,74 @@ function planLayoutWarningPrompt(warnings, prompt, revision) {
   }
 
   return { warningIds, expectedRevision, conflicts, queueIds, hadKnownWarning };
+}
+
+// The active artifact load, in the shape state.json carries it. Snake-cased like every other
+// stored field, and complete: the fences a begin is judged against (`request_id`,
+// `request_sequence`, `handoff_token`) belong to the same epoch as the token, so a process that
+// restored the token without them would answer a reviewer's retry with a new epoch, or let a
+// begin the previous process already overtook win.
+function serializeArtifactLoad(load) {
+  return {
+    artifact_load_token: load.artifactLoadToken,
+    artifact_revision: load.artifactRevision,
+    last_pass_sequence: load.lastPassSequence,
+    request_id: load.requestId,
+    request_sequence: load.requestSequence,
+    handoff_token: load.handoffToken,
+  };
+}
+
+// Every key `serializeArtifactLoad` writes. A record this code wrote always carries all six, so a
+// record missing one was not written by this code and cannot be read as a whole.
+const STORED_ARTIFACT_LOAD_FIELDS = [
+  "artifact_load_token",
+  "artifact_revision",
+  "last_pass_sequence",
+  "request_id",
+  "request_sequence",
+  "handoff_token",
+];
+
+// All of the epoch or none of it. Restoring a partial record would honor the token while some
+// fence it travels with defaulted away: without `handoff_token` the load answers 200 to everyone
+// while its own reviewer's next begin is told `no-handoff`, and without `request_sequence` a begin
+// the previous process already overtook wins. So an older or hand-edited state.json degrades to
+// the pre-persistence behaviour - one re-handshake and a fresh epoch - rather than admitting a
+// load the store can only partly describe. Presence and type are what is checked, not value:
+// `request_id` is legitimately "" and both sequence fences are legitimately 0 on a just-begun
+// load. The revision is not: `beginArtifactLoad` only mints positive ones, so 0 is a value this
+// code never wrote and a load restored with it would be served at a revision that never existed.
+// The two tokens are additionally required non-empty, which rejects nothing this code wrote
+// (`beginArtifactLoad` only mints non-empty ones) and is load-bearing for `artifact_load_token`:
+// diagnostics compare their own token against it, so an empty restored token would be matched by
+// a token-less pass.
+function restoreArtifactLoad(stored) {
+  if (!stored || typeof stored !== "object" || Array.isArray(stored)) return null;
+  if (STORED_ARTIFACT_LOAD_FIELDS.some((field) => !Object.hasOwn(stored, field))) return null;
+  const artifactLoadToken = stored.artifact_load_token;
+  const handoffToken = stored.handoff_token;
+  const requestId = stored.request_id;
+  if (typeof artifactLoadToken !== "string" || !artifactLoadToken) return null;
+  if (typeof handoffToken !== "string" || !handoffToken) return null;
+  if (typeof requestId !== "string") return null;
+  const artifactRevision = parseSequenceValue(stored.artifact_revision);
+  if (artifactRevision === 0) return null;
+  const lastPassSequence = parseSequenceValue(stored.last_pass_sequence);
+  const requestSequence = parseSequenceValue(stored.request_sequence);
+  if (artifactRevision === null || lastPassSequence === null || requestSequence === null) return null;
+  return { artifactRevision, artifactLoadToken, lastPassSequence, requestId, requestSequence, handoffToken };
+}
+
+function normalizeStoredArtifactLoad(stored) {
+  const restored = restoreArtifactLoad(stored);
+  return restored ? serializeArtifactLoad(restored) : null;
+}
+
+// Null rather than 0 for anything unreadable: 0 is a real sequence, so coercing to it would turn a
+// corrupt fence into an open one.
+function parseSequenceValue(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 function normalizeRevision(value) {

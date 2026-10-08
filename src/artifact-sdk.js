@@ -1,5 +1,6 @@
 /* global CSS, Element, MutationObserver, ResizeObserver, document, getComputedStyle, parent, window */
 
+import { readArtifactRevisions } from "./artifact-revisions.js";
 import * as mermaidHelpers from "./mermaid-node.js";
 import { tableCellTarget } from "./table-cell.js";
 
@@ -114,13 +115,21 @@ export function deriveLavishQueueKey(element, options = {}) {
 }
 
 export function isNativeInteractiveControl(el) {
-  return !!(
-    el &&
-    el.closest &&
+  if (!el || !el.closest) return false;
+  if (
     el.closest(
       "button,input,select,textarea,option,optgroup,label,summary,[contenteditable]:not([contenteditable='false'])",
     )
+  ) {
+    return true;
+  }
+  const widget = el.closest(
+    "[role='button'],[role='checkbox'],[role='combobox'],[role='menuitem'],[role='menuitemcheckbox']," +
+      "[role='menuitemradio'],[role='option'],[role='radio'],[role='switch'],[role='tab'],[role='treeitem']",
   );
+  if (!widget) return false;
+  const link = el.closest("a[href]");
+  return !(link && widget.contains(link));
 }
 
 // A severe text failure needs rendered-fragment proof. Scroll dimensions include harmless font
@@ -467,6 +476,9 @@ export function createArtifactSdk(
   let hovered = null;
   let selected = null;
   let ignoreNextClick = false;
+  // Selectors the chrome reports as carrying a queued note. A click on one opens that note in the
+  // chrome's panel instead of a fresh card; the note's words never enter this document.
+  let queuedAnchorSelectors = new Set();
   let shadow = null;
   let counter = 0;
   const ids = new WeakMap();
@@ -1045,6 +1057,7 @@ export function createArtifactSdk(
       const target = whiteboardEntryByIndex(msg.diagramIndex);
       if (target) target.iframe.src = whiteboardFrameSrc(target);
     }
+    if (msg.type === "lavish:requestLayoutDiagnostics") scheduleLayoutAudit(true);
   });
 
   function enhanceMermaid() {
@@ -1144,9 +1157,9 @@ export function createArtifactSdk(
   }
 
   // Native interactive controls (radios, checkboxes, inputs, selects, buttons,
-  // labels, disclosure summaries, editable regions) should toggle/focus/type
-  // natively instead of triggering annotation, just like elements marked with
-  // data-lavish-action.
+  // labels, disclosure summaries, editable regions, interactive ARIA widgets)
+  // should toggle/focus/type natively instead of triggering annotation, just
+  // like elements marked with data-lavish-action.
   function isInteractiveControl(el) {
     return isNativeInteractive(el);
   }
@@ -1188,7 +1201,7 @@ export function createArtifactSdk(
       style = document.createElement("style");
       style.id = "lavish-cursor-style";
       style.textContent =
-        ":root{--lavish-accent:#f4c95d;--lavish-annotate-outline:2px solid var(--lavish-accent);--lavish-annotate-offset:2px}*{cursor:default!important}[data-lavish-action],[data-lavish-action] *{cursor:pointer!important}input,textarea,[contenteditable]:not([contenteditable='false']){cursor:text!important}button,select,label,option,input[type='button'],input[type='submit'],input[type='reset'],input[type='checkbox'],input[type='radio'],input[type='file'],input[type='color'],input[type='range'],input[type='image']{cursor:pointer!important}";
+        ":root{--lavish-accent:#f4c95d;--lavish-annotate-outline:2px solid var(--lavish-accent);--lavish-annotate-offset:2px}*{cursor:default!important}:where(:is([role='button'],[role='checkbox'],[role='combobox'],[role='menuitem'],[role='menuitemcheckbox'],[role='menuitemradio'],[role='option'],[role='radio'],[role='switch'],[role='tab'],[role='treeitem']):not(a[href])),:where(:is([role='button'],[role='checkbox'],[role='combobox'],[role='menuitem'],[role='menuitemcheckbox'],[role='menuitemradio'],[role='option'],[role='radio'],[role='switch'],[role='tab'],[role='treeitem']):not(a[href])) *{cursor:pointer!important}:where(:is([role='button'],[role='checkbox'],[role='combobox'],[role='menuitem'],[role='menuitemcheckbox'],[role='menuitemradio'],[role='option'],[role='radio'],[role='switch'],[role='tab'],[role='treeitem']) a[href]),:where(:is([role='button'],[role='checkbox'],[role='combobox'],[role='menuitem'],[role='menuitemcheckbox'],[role='menuitemradio'],[role='option'],[role='radio'],[role='switch'],[role='tab'],[role='treeitem']) a[href]) *{cursor:default!important}[data-lavish-action],[data-lavish-action] *{cursor:pointer!important}input,textarea,[contenteditable]:not([contenteditable='false']){cursor:text!important}button,select,label,option,input[type='button'],input[type='submit'],input[type='reset'],input[type='checkbox'],input[type='radio'],input[type='file'],input[type='color'],input[type='range'],input[type='image']{cursor:pointer!important}";
       document.head.appendChild(style);
     }
     if (!annotationMode && style) style.remove();
@@ -1262,6 +1275,7 @@ export function createArtifactSdk(
   let layoutAuditTimer = 0;
   let layoutAuditRun = 0;
   let lastLayoutAuditSignature = null;
+  let layoutAuditPublishRequested = false;
   let layoutAuditPassSequence = 0;
 
   function toPixelNumber(value) {
@@ -1963,7 +1977,12 @@ export function createArtifactSdk(
       new Promise((resolve) => window.setTimeout(resolve, layoutAuditAnimationMaxWaitMs)),
     ]);
     if (!settled) {
-      for (const animation of finite) animation.finished.then(scheduleLayoutAudit, scheduleLayoutAudit);
+      for (const animation of finite) {
+        animation.finished.then(
+          () => scheduleLayoutAudit(),
+          () => scheduleLayoutAudit(),
+        );
+      }
     }
     return settled;
   }
@@ -1975,7 +1994,8 @@ export function createArtifactSdk(
     const severe = findings.filter((finding) => finding?.severity === "error");
     const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
     const signature = JSON.stringify({ complete, targetPresenceComplete, viewportWidth, severe });
-    if (signature === lastLayoutAuditSignature) return;
+    if (!layoutAuditPublishRequested && signature === lastLayoutAuditSignature) return;
+    layoutAuditPublishRequested = false;
     lastLayoutAuditSignature = signature;
     postArtifactMessage("lavish:layoutDiagnostics", {
       complete,
@@ -2010,7 +2030,8 @@ export function createArtifactSdk(
     );
   }
 
-  function scheduleLayoutAudit() {
+  function scheduleLayoutAudit(publishRequested = false) {
+    if (publishRequested) layoutAuditPublishRequested = true;
     if (layoutAuditTimer) window.clearTimeout(layoutAuditTimer);
     const runId = ++layoutAuditRun;
     layoutAuditTimer = window.setTimeout(() => {
@@ -2022,10 +2043,10 @@ export function createArtifactSdk(
 
   function startLayoutAudit() {
     scheduleLayoutAudit();
-    window.addEventListener("load", scheduleLayoutAudit, { once: true });
-    window.addEventListener("resize", scheduleLayoutAudit, { passive: true });
-    window.addEventListener("animationend", scheduleLayoutAudit, { passive: true });
-    window.addEventListener("transitionend", scheduleLayoutAudit, { passive: true });
+    window.addEventListener("load", () => scheduleLayoutAudit(), { once: true });
+    window.addEventListener("resize", () => scheduleLayoutAudit(), { passive: true });
+    window.addEventListener("animationend", () => scheduleLayoutAudit(), { passive: true });
+    window.addEventListener("transitionend", () => scheduleLayoutAudit(), { passive: true });
   }
 
   // The narrow fatal path. A local subresource the artifact declares but the server cannot serve
@@ -2207,7 +2228,7 @@ export function createArtifactSdk(
 
     shadow = host.attachShadow({ mode: "open" });
     const style = document.createElement("style");
-    style.textContent = `:host{all:initial;position:fixed;z-index:2147483647;left:0;top:0;color-scheme:dark;--ink-900:#0f1115;--ink-800:#11141a;--ink-700:#171a21;--ink-600:#1c212b;--steel-700:#2a2f3a;--steel-600:#303745;--steel-500:#3c4557;--steel-400:#8c96aa;--steel-300:#aeb6c6;--steel-200:#b9c0cf;--steel-100:#d8deea;--cream-50:#fffbf3;--cream-100:#f7f3ea;--cream-200:#e8e1cf;--brass-500:#f4c95d;--brass-400:#ffd877;--brass-ink:#17130a;--bg:var(--ink-900);--bg-panel:var(--ink-800);--bg-elevated:var(--ink-600);--fg:var(--cream-100);--fg-faint:var(--steel-300);--border:var(--steel-600);--accent:#f4c95d;--accent-hover:#ffd877;--font-sans:Geist,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--font-mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--radius-md:10px;--radius-xl:14px;--shadow-floating:0 20px 70px rgba(0,0,0,.35);font-family:var(--font-sans)}*{box-sizing:border-box}:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.lavish-text-highlight{position:fixed;pointer-events:none;background:rgba(244,201,93,.28);border-radius:2px;box-shadow:0 0 0 1px rgba(244,201,93,.45)}.lavish-annotation-card{position:fixed;width:min(640px,calc(100vw - 24px));padding:12px;border-radius:var(--radius-xl);background:var(--bg-panel);color:var(--fg);border:1px solid var(--accent);box-shadow:var(--shadow-floating);font:14px/1.4 var(--font-sans)}.lavish-heading{font-weight:700;margin-bottom:6px}.lavish-annotation-card textarea{width:100%;min-height:129px;resize:vertical;border-radius:var(--radius-md);border:1px solid var(--border);background:var(--bg);color:var(--fg);padding:9px;font:inherit;font-family:var(--font-sans)}.lavish-annotation-card textarea::placeholder{color:var(--fg-faint)}.lavish-annotation-card .lavish-hint{margin-top:6px;font-size:11px;color:var(--fg-faint)}.lavish-annotation-card .lavish-hint-alert{color:#ff9d7a;font-weight:700}.lavish-annotation-card .lavish-row{display:flex;gap:8px;justify-content:flex-end;margin-top:8px}.lavish-annotation-card button{border:0;border-radius:var(--radius-md);padding:8px 10px;font-family:var(--font-sans);font-size:13px;font-weight:700;cursor:pointer}.lavish-annotation-card button:active{opacity:.85}.lavish-annotation-card .lavish-send{background:var(--accent);color:var(--brass-ink)}.lavish-annotation-card .lavish-send:hover{background:var(--accent-hover)}.lavish-annotation-card .lavish-cancel{background:var(--steel-700);color:var(--fg)}.lavish-annotation-card.is-dropping{outline:2px dashed var(--accent);outline-offset:3px}.lavish-attachments{display:flex;flex-direction:column;gap:6px;margin-top:8px;max-height:176px;overflow-y:auto}.lavish-attachment-chip{display:flex;align-items:center;gap:8px;padding:6px;border-radius:var(--radius-md);background:var(--bg);border:1px solid var(--border)}.lavish-attachment-chip.is-error{border-color:#e0623d}.lavish-attachment-thumb{width:32px;height:32px;border-radius:6px;object-fit:cover;background:var(--ink-700);flex:0 0 auto}.lavish-attachment-thumb-empty{display:inline-block}.lavish-attachment-body{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1 1 auto}.lavish-attachment-name{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lavish-attachment-status{font-size:11px;color:var(--fg-faint)}.lavish-attachment-status-error{color:#ff9d7a}.lavish-attachment-retry{flex:0 0 auto;padding:4px 8px;font-size:11px;font-weight:700;border-radius:8px;background:var(--steel-700);color:var(--fg);cursor:pointer;border:0}.lavish-attachment-remove{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0!important;border-radius:50%;background:transparent;color:rgba(255,255,255,.85);cursor:pointer;border:0}.lavish-attachment-remove:hover{background:rgba(255,255,255,.14);color:#fff}.lavish-attach-row{margin-top:8px}.lavish-attach{display:inline-flex;align-items:center;gap:6px;padding:6px 9px!important;background:var(--steel-700)!important;color:var(--fg)!important;font-size:12px!important}.lavish-attach:hover{background:var(--steel-600)!important}.lavish-reveal-marker{position:fixed;pointer-events:none;border:2px solid var(--accent);border-radius:4px;box-shadow:0 0 0 4px rgba(244,201,93,.22);animation:lavish-reveal-pulse 2.4s var(--ease,ease-out) forwards}@keyframes lavish-reveal-pulse{0%{opacity:0}12%{opacity:1}70%{opacity:1}100%{opacity:0}}`;
+    style.textContent = `:host{all:initial;position:fixed;z-index:2147483647;left:0;top:0;color-scheme:dark;--ink-900:#0f1115;--ink-800:#11141a;--ink-700:#171a21;--ink-600:#1c212b;--steel-700:#2a2f3a;--steel-600:#303745;--steel-500:#3c4557;--steel-400:#8c96aa;--steel-300:#aeb6c6;--steel-200:#b9c0cf;--steel-100:#d8deea;--cream-50:#fffbf3;--cream-100:#f7f3ea;--cream-200:#e8e1cf;--brass-500:#f4c95d;--brass-400:#ffd877;--brass-ink:#17130a;--bg:var(--ink-900);--bg-panel:var(--ink-800);--bg-elevated:var(--ink-600);--fg:var(--cream-100);--fg-faint:var(--steel-300);--border:var(--steel-600);--accent:#f4c95d;--accent-hover:#ffd877;--font-sans:Geist,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--font-mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--radius-md:10px;--radius-xl:14px;--shadow-floating:0 20px 70px rgba(0,0,0,.35);font-family:var(--font-sans)}*{box-sizing:border-box}:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.lavish-text-highlight{position:fixed;pointer-events:none;background:rgba(244,201,93,.28);border-radius:2px;box-shadow:0 0 0 1px rgba(244,201,93,.45)}.lavish-annotation-card{position:fixed;width:min(720px,calc(100vw - 24px));padding:12px;border-radius:var(--radius-xl);background:var(--bg-panel);color:var(--fg);border:1px solid var(--accent);box-shadow:var(--shadow-floating);font:14px/1.4 var(--font-sans)}.lavish-heading{font-weight:700;margin-bottom:6px}.lavish-annotation-card textarea{width:100%;min-height:clamp(64px,calc(100vh - 200px),160px);resize:vertical;border-radius:var(--radius-md);border:1px solid var(--border);background:var(--bg);color:var(--fg);padding:9px;font:inherit;font-family:var(--font-sans)}.lavish-annotation-card textarea::placeholder{color:var(--fg-faint)}.lavish-annotation-card .lavish-hint{margin-top:6px;font-size:11px;color:var(--fg-faint)}.lavish-annotation-card .lavish-hint-alert{color:#ff9d7a;font-weight:700}.lavish-annotation-card .lavish-row{display:flex;gap:8px;justify-content:flex-end;margin-top:8px}.lavish-annotation-card button{border:0;border-radius:var(--radius-md);padding:8px 10px;font-family:var(--font-sans);font-size:13px;font-weight:700;cursor:pointer}.lavish-annotation-card button:active{opacity:.85}.lavish-annotation-card .lavish-send{background:var(--accent);color:var(--brass-ink)}.lavish-annotation-card .lavish-send:hover{background:var(--accent-hover)}.lavish-annotation-card .lavish-cancel{background:var(--steel-700);color:var(--fg)}.lavish-annotation-card.is-dropping{outline:2px dashed var(--accent);outline-offset:3px}.lavish-attachments{display:flex;flex-direction:column;gap:6px;margin-top:8px;max-height:176px;overflow-y:auto}.lavish-attachment-chip{display:flex;align-items:center;gap:8px;padding:6px;border-radius:var(--radius-md);background:var(--bg);border:1px solid var(--border)}.lavish-attachment-chip.is-error{border-color:#e0623d}.lavish-attachment-thumb{width:32px;height:32px;border-radius:6px;object-fit:cover;background:var(--ink-700);flex:0 0 auto}.lavish-attachment-thumb-empty{display:inline-block}.lavish-attachment-body{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1 1 auto}.lavish-attachment-name{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lavish-attachment-status{font-size:11px;color:var(--fg-faint)}.lavish-attachment-status-error{color:#ff9d7a}.lavish-attachment-retry{flex:0 0 auto;padding:4px 8px;font-size:11px;font-weight:700;border-radius:8px;background:var(--steel-700);color:var(--fg);cursor:pointer;border:0}.lavish-attachment-remove{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0!important;border-radius:50%;background:transparent;color:rgba(255,255,255,.85);cursor:pointer;border:0}.lavish-attachment-remove:hover{background:rgba(255,255,255,.14);color:#fff}.lavish-attach-row{margin-top:8px}.lavish-attach{display:inline-flex;align-items:center;gap:6px;padding:6px 9px!important;background:var(--steel-700)!important;color:var(--fg)!important;font-size:12px!important}.lavish-attach:hover{background:var(--steel-600)!important}.lavish-reveal-marker{position:fixed;pointer-events:none;border:2px solid var(--accent);border-radius:4px;box-shadow:0 0 0 4px rgba(244,201,93,.22);animation:lavish-reveal-pulse 2.4s var(--ease,ease-out) forwards}@keyframes lavish-reveal-pulse{0%{opacity:0}12%{opacity:1}70%{opacity:1}100%{opacity:0}}`;
     shadow.appendChild(style);
     return shadow;
   }
@@ -2408,6 +2429,12 @@ export function createArtifactSdk(
         const queued = tryQueue();
         // postMessage delivery is ordered, so the queued prompt lands before the send.
         if (queued && sendNow) sendQueuedPrompts();
+      } else if (event.key === "Escape" && !event.isComposing) {
+        // Close only when there is nothing to lose; excludes isComposing since mid-IME text isn't in textarea.value yet.
+        if (textarea.value.trim() || attachments.hasPending() || attachments.hasErrors() || attachments.hasReady())
+          return;
+        event.preventDefault();
+        closeCard();
       }
     });
     // Unsent annotation text is review context Lavish owns, so it is reported to the chrome and
@@ -2451,13 +2478,23 @@ export function createArtifactSdk(
       activeAttachments?.handleResult(msg.localId, msg.ok, msg.id, msg.error);
     }
     if (msg.type === "lavish:requestSnapshot") {
-      postArtifactMessage("lavish:snapshot", { snapshot: snapshot() });
+      postArtifactMessage("lavish:snapshot", {
+        snapshot: snapshot(),
+        snapshot_request_id: typeof msg.snapshot_request_id === "string" ? msg.snapshot_request_id : "",
+      });
     }
     if (msg.type === "lavish:restoreScroll") {
       window.scrollTo(Number(msg.x) || 0, Number(msg.y) || 0);
     }
     if (msg.type === "lavish:restoreReviewState") restoreReviewState(msg.state);
     if (msg.type === "lavish:revealElement") revealElement(msg.selector);
+    if (msg.type === "lavish:queuedAnchors") {
+      queuedAnchorSelectors = new Set(Array.isArray(msg.selectors) ? msg.selectors.map(String) : []);
+    }
+    if (msg.type === "lavish:annotateElement" && annotationMode) {
+      const target = safeQuerySelector(msg.selector);
+      if (target) showAnnotationCard(target);
+    }
   });
 
   // Bring a warning's element into view and flash it. The marker is Lavish UI, so it is excluded
@@ -2568,10 +2605,28 @@ export function createArtifactSdk(
         isInteractiveControl(event.target)
       )
         return;
+      // Ctrl/Cmd-click on a link follows it (the browser opens a new tab) instead of annotating,
+      // so links stay usable without leaving annotate mode. Checked before the queued-note branch
+      // so the modifier always wins, and it clears a pending text-selection swallow so the next
+      // plain click is not eaten.
+      if ((event.ctrlKey || event.metaKey) && /** @type {Element} */ (event.target)?.closest?.("a[href]")) {
+        ignoreNextClick = false;
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       if (ignoreNextClick) {
         ignoreNextClick = false;
+        return;
+      }
+      // The clicked element's own selector, plus its diagram node's, so any click inside a node
+      // finds the node's note again. A table cell's note stays on the exact element clicked.
+      const clicked = queuedAnchorSelectors.size ? context(event.target) : null;
+      const node = clicked?.target?.type === "mermaid-node" ? clicked.target.selector : "";
+      const selector = [clicked?.selector, node].find((candidate) => candidate && queuedAnchorSelectors.has(candidate));
+      if (selector) {
+        closeCard();
+        postArtifactMessage("lavish:editQueuedAnchor", { selector });
         return;
       }
       showAnnotationCard(event.target);
@@ -2594,4 +2649,24 @@ export function createArtifactSdk(
   }
   const mermaidObserver = new MutationObserver(() => scheduleMermaidEnhance());
   mermaidObserver.observe(document.documentElement, { childList: true, subtree: true });
+
+  // Report the agent-declared revision registry so the chrome can offer its
+  // legend. Read-only: the SDK never marks up the page for it, because a
+  // highlight painted here would make the served artifact differ from the file
+  // opened without Lavish. The message is sent even when the artifact declares
+  // nothing, so a reload that removed the registry clears a stale legend.
+  function reportArtifactRevisions() {
+    let payload = { revisions: [], marks: [] };
+    try {
+      payload = readArtifactRevisions(document);
+    } catch {
+      // A malformed registry costs the reader a legend, never the review.
+    }
+    postArtifactMessage("lavish:revisions", payload);
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", reportArtifactRevisions, { once: true });
+  } else {
+    reportArtifactRevisions();
+  }
 }

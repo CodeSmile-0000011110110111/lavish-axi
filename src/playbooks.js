@@ -7,27 +7,32 @@ export const PLAYBOOK_ROUTER_HELP =
 export const PLAYBOOKS = [
   {
     id: "diagram",
-    use_when: "Map relationships, flows, state, and architecture",
+    use_when: "Explain relationships, flows, state, architecture, and concepts with illustrations",
     choose: [
-      "Use Mermaid when automatic node placement and edge routing matter more than rich card content.",
-      "Use CSS grid, SVG, or positioned HTML when each item needs prose, code, controls, or detailed annotations.",
-      "Use a hybrid shape for large systems: a small overview diagram followed by detailed module cards.",
+      "Default to hand-authored inline SVG: it gives proportion, emphasis, spatial metaphor, and annotation-ready structure that generated layouts cannot.",
+      "Use Mermaid only when the user asks for an editable whiteboard: rendered Mermaid in a `.mermaid` container becomes an Excalidraw whiteboard in the Lavish browser.",
+      "For large systems, draw a small overview illustration and put detail in module cards below it, instead of one dense auto-laid graph.",
     ],
     structure: [
+      "Assume the reader knows nothing about the system or concept: explain from zero; do not presume prior familiarity.",
+      "Prefer one concept per diagram: a sequence of simple single-concept illustrations over one dense figure that combines several; layer understanding step by step.",
       "Lead with the question the diagram answers, not with the implementation detail that produced it.",
       "Keep the first visual to the core relationship, then put dense evidence or file references below it.",
       "For complex systems, separate topology from detail so the overview stays readable.",
     ],
     design_rules: [
-      "Use page-scoped class names and avoid generic names like .node that can collide with diagram libraries.",
-      "Prefer top-down flow for multi-step diagrams unless the flow is genuinely linear and short.",
-      "Quote labels that contain punctuation or code-like names, and use explicit line breaks where the renderer supports them.",
-      "Initialize Mermaid to match the page theme and re-render when the theme changes: pick the Mermaid theme from the effective page appearance (light or dark) at render time, and use the theme-aware `lavish-axi design` Mermaid snippet rather than hardcoding a single theme, since Mermaid does not restyle an already-rendered SVG when the viewer toggles the page theme.",
+      "Size with viewBox plus width:100%; never fixed pixel dimensions, and keep every element inside the viewBox.",
+      "Color through currentColor and the page's CSS custom properties so figures follow the artifact's light and dark themes.",
+      "Give every meaningful node, edge, and region a stable id and a <title> so reviewers can annotate precisely.",
+      "Keep labels to a few words and put prose beside the figure in HTML - SVG text does not wrap, so short labels are also the overflow discipline.",
+      "Keep figures self-contained: no external images, fonts, or scripts, so exports render offline.",
+      "Render-verify before serving: screenshot the artifact in light, dark, and a narrow viewport - the layout audit deliberately skips SVG interiors.",
+      "When the user asked for a whiteboard, initialize Mermaid theme-aware with the `lavish-axi design` snippet rather than hardcoding one theme.",
     ],
     pitfalls: [
-      "Do not cram every file or function into one diagram when a layered explanation would be clearer.",
-      "Do not hand-build boxes-and-arrows from div/flexbox for a flow: it does not auto-route edges and reads worse than Mermaid; reach for Mermaid or SVG for richly annotated nodes.",
-      "Do not let default diagram colors clash with the page palette or dark mode.",
+      "Do not cram every file or function into one figure when a layered explanation would be clearer.",
+      "Do not hand-build boxes-and-arrows from div/flexbox: inline SVG owns figures, HTML owns the prose around them.",
+      "Do not reach for Mermaid to save authoring effort - it surrenders position, size, and emphasis to the engine.",
       "Do not present unverified architecture claims as facts. Cite the files or commands that support them.",
     ],
     lavish_notes: [
@@ -61,6 +66,7 @@ export const PLAYBOOKS = [
     lavish_notes: [
       "A Lavish table should make individual rows easy annotation targets.",
       "If a row implies a follow-up change, include an action control that queues a specific prompt.",
+      "When one action covers multiple rows and completeness matters, also follow the input playbook's tracked batch pattern so the reviewer submits one explicit ID set for item-by-item accounting.",
     ],
   },
   {
@@ -184,21 +190,24 @@ export const PLAYBOOKS = [
     choose: [
       "Use this when the user needs to select, tune, triage, annotate, or edit a structured choice.",
       "Use controls for decisions the user can make faster visually than by writing a prompt.",
+      "Use an opt-in tracked batch when the agent must preserve completeness across a multi-item decision, such as findings to fixes, constraints to implementation, or recommendations to follow-up work.",
       "Use plain annotations when the artifact only needs open-ended feedback.",
     ],
     structure: [
       "Make each decision surface visible: what is being chosen, what the options mean, and what happens next.",
+      "For a tracked batch, give every candidate item a short, stable, visible ID and let the reviewer select or disposition items with editable native controls.",
       "Keep reversible selection state local in the artifact until the user explicitly submits that question.",
       "Pair each question with a Submit or Queue answer control that sends exactly one prompt for the final answer.",
       "Show selected state separately from queued state so the user trusts what will be sent back.",
     ],
     design_rules: [
-      "Native controls - radios, checkboxes, text inputs, selects, textareas, buttons, options, labels, disclosure summaries, and contenteditable regions - are interactive automatically: clicks toggle, focus, and type instead of annotating, so they do not need data-lavish-action. Build choice and option UIs from these whenever you can.",
+      "Native controls - radios, checkboxes, text inputs, selects, textareas, buttons, options, labels, disclosure summaries, and contenteditable regions - and custom widgets with an interactive ARIA role (button, checkbox, combobox, menuitem, option, radio, switch, tab, treeitem, and the menuitem variants) are interactive automatically: clicks toggle, focus, and type instead of annotating, so they do not need data-lavish-action. An <a href> stays annotatable when it carries one of these roles or sits inside such a widget. Build choice and option UIs from these whenever you can.",
       "For reversible choices, do not call window.lavish.queuePrompt() from radio change handlers or option click handlers. Those handlers should only update local selected state.",
       "Use a per-question form submit or explicit Queue answer button to read the current values and call window.lavish.queuePrompt() exactly once for the final answer.",
       "Put data-lavish-action only on custom (non-native) elements that should act like a feedback control - typically a styled div or span you made clickable - so Lavish does not annotate it and shows a pointer cursor instead.",
       "Use data-lavish-question on a question wrapper or pass queueKey when multiple pre-send updates should replace the prior unsent answer for the same question.",
       "Pass options such as tag, text, selector, target, data, queueKey, or element when they help the agent understand exactly what the user chose.",
+      "For a tracked batch, queue the final selected set once in a concise, bounded data.items array; include each item's stable ID, concise label, and requested disposition, and explicitly tell the agent to account for every submitted ID before reporting completion.",
       "Call window.lavish.sendQueuedPrompts() only when the control should immediately send committed feedback instead of waiting for the user to press Send to Agent.",
       "Make queued prompts specific enough that the agent can act without asking a follow-up question.",
       "Keep native browser controls accessible and readable on mobile.",
@@ -212,9 +221,123 @@ export const PLAYBOOKS = [
     lavish_notes: [
       "Lavish is strongest when the artifact becomes a focused review surface and not just a static page.",
       'A native single-choice question should submit the final value: `<form data-lavish-question="plan" onsubmit="event.preventDefault(); const choice = new FormData(event.currentTarget).get(\'plan\'); if (choice) window.lavish.queuePrompt(\'Use the \' + choice + \' plan\', { tag: \'choice\', text: \'Plan: \' + choice, element: event.currentTarget, data: { question: \'plan\', answer: choice } });"><label><input type="radio" name="plan" value="Starter"> Starter</label><label><input type="radio" name="plan" value="Pro"> Pro</label><button type="submit">Queue this answer</button></form>`.',
+      `A tracked batch should submit the final selected set once: <form data-lavish-question="tracked-review" onsubmit="event.preventDefault(); const selected = [...event.currentTarget.querySelectorAll('input[name=items]:checked')].map((input) => ({ id: input.value, label: input.dataset.label, disposition: input.dataset.disposition })); if (selected.length) window.lavish.queuePrompt('Act on every selected item and return an item-by-item receipt. Account for every submitted ID before reporting completion.', { tag: 'tracked-batch', text: 'Apply ' + selected.length + ' selected review items', element: event.currentTarget, data: { items: selected } });"><label><input type="checkbox" name="items" value="R-03" data-label="Preserve rollback behavior" data-disposition="must-address"> R-03 — Preserve rollback behavior</label><label><input type="checkbox" name="items" value="R-08" data-label="Reuse the existing error surface" data-disposition="must-address"> R-08 — Reuse the existing error surface</label><button type="submit">Queue selected items</button></form>`,
+      `For a decision artifact a human may open by double-clicking the HTML, optionally include this standalone answer-copy control: it copies every question's answers as text the human pastes back into the chat for the agent to read. It works without Lavish and remains absent unless you write it into the artifact:
+\`\`\`html
+<div>
+  <button type="button" onclick="(async (btn) => {
+    const copyRun = btn._lavishCopyRun = (btn._lavishCopyRun || 0) + 1;
+    const qs = [...document.querySelectorAll('[data-lavish-question]')];
+    const status = btn.parentElement.querySelector('[data-lavish-copy-all-status]');
+    btn.parentElement.querySelector('[data-lavish-copy-all-manual]')?.remove();
+    const out = [];
+    for (const q of qs) {
+      const key = q.getAttribute('data-lavish-question')?.trim() || 'Question';
+      const lines = [];
+      for (const el of q.querySelectorAll('input, select, textarea')) {
+        if (el.matches(':disabled')) continue;
+        if (el.closest('[data-lavish-question]') !== q) continue;
+        const isChoice = el.matches('input[type=checkbox], input[type=radio]');
+        if (isChoice && !el.checked) continue;
+        if (el.matches('input[type=button], input[type=submit], input[type=reset], input[type=image], input[type=hidden], input[type=file], input[type=range], input[type=color]')) continue;
+        let vals;
+        if (el instanceof HTMLSelectElement) {
+          vals = [...el.selectedOptions].filter((o) => !o.disabled && !o.closest('optgroup[disabled]')).map((o) => o.value.trim()).filter(Boolean);
+        } else {
+          const v = isChoice && (!el.hasAttribute('value') || !el.value.trim())
+            ? el.labels?.[0]?.textContent?.trim() || el.getAttribute('aria-label')?.trim() || el.name || ''
+            : el.value.trim();
+          vals = v ? [v] : [];
+        }
+        const label = el.name || el.labels?.[0]?.textContent?.trim() || el.getAttribute('aria-label')?.trim() || el.getAttribute('placeholder')?.trim() || el.tagName.toLowerCase();
+        for (const v of vals) lines.push('  ' + label + ': ' + v.split('\\n').join('\\n    '));
+      }
+      if (lines.length) out.push(key + ':\\n' + lines.join('\\n'));
+    }
+    const text = out.join('\\n\\n');
+    if (!text) {
+      status.textContent = qs.length ? 'No answers to copy yet.' : 'No questions or answers to copy.';
+      return;
+    }
+    status.textContent = '';
+    try {
+      if (typeof navigator.clipboard?.writeText !== 'function') throw new Error('Clipboard API unavailable');
+      await navigator.clipboard.writeText(text);
+      if (copyRun !== btn._lavishCopyRun) return;
+      status.textContent = 'Answers copied.';
+      return;
+    } catch {}
+    if (copyRun !== btn._lavishCopyRun) return;
+    const tmp = document.createElement('textarea');
+    tmp.value = text;
+    tmp.readOnly = true;
+    tmp.setAttribute('aria-hidden', 'true');
+    tmp.style.position = 'fixed';
+    tmp.style.left = '-10000px';
+    document.body.append(tmp);
+    tmp.focus();
+    tmp.select();
+    let ok = false;
+    try {
+      ok = document.execCommand('copy');
+    } catch {}
+    tmp.remove();
+    if (ok) {
+      status.textContent = 'Answers copied.';
+      return;
+    }
+    btn.parentElement.querySelector('[data-lavish-copy-all-manual]')?.remove();
+    const man = document.createElement('textarea');
+    man.value = text;
+    man.readOnly = true;
+    man.rows = Math.min(12, Math.max(3, text.split('\\n').length));
+    man.setAttribute('aria-label', 'Answers to copy manually');
+    man.dataset.lavishCopyAllManual = '';
+    btn.insertAdjacentElement('afterend', man);
+    man.focus();
+    man.select();
+    status.textContent = 'Clipboard unavailable. Copy the answers below manually.';
+  })(this)">Copy all answers</button>
+  <span data-lavish-copy-all-status role="status" aria-live="polite"></span>
+</div>
+\`\`\``,
+      "The agent's tracked-batch completion receipt must give every submitted ID exactly one outcome: addressed with concrete evidence, deferred with a reason, or rejected with a reason. Evidence may cover several IDs. Before declaring completion, compare the submitted ID set with the receipt ID set and surface every missing ID.",
       "A custom choice UI should make option buttons update local state, then use a separate Queue answer button with data-lavish-action to queue the final selected value.",
       "Use window.lavish.queuePrompt for user intent, not internal analytics or UI-only state changes.",
       "End input paths with an obvious way for the user to send feedback back to the agent.",
+    ],
+  },
+  {
+    id: "explanation",
+    use_when:
+      "Explain an existing system, PR, incident, or decision to a reader who was not there - when the goal is understanding what is and why, not choosing a direction or inspecting a plan before implementation",
+    choose: [
+      "Use this when the reader needs to understand something that already exists: a PR's mechanism, an incident's root cause, an architecture, a past decision.",
+      "Use the plan playbook when the reader must inspect and approve an approach before implementation begins; use comparison when they must choose between options.",
+      "Combine with diagram for flows or architecture, table for evidence inventories, and code when the mechanism lives in specific lines.",
+    ],
+    structure: [
+      "Lead with the one-sentence answer to the question the reader actually has, before any mechanism.",
+      "Then show only what changed or how it works - a flow or before/after of the relevant slice, not a diagram of the whole system.",
+      "Keep evidence (file paths, line references, links, commands) subordinate to the narrative: cited where a claim needs support, never inlined wholesale.",
+      "Make each claim its own section or annotation target so the reader can push back on exactly the part they disagree with.",
+      "End with what was deliberately left out and where to look next, not a summary that restates the piece.",
+    ],
+    design_rules: [
+      "Define unfamiliar terms at first use; for the reader's starting point, follow the diagram playbook's assume-nothing rule rather than restating it here.",
+      "Name the question the explanation answers at the top, so the reader knows whether it is their question.",
+      "Put prose beside figures - inline SVG for the flow or before/after, HTML for the reasoning - per the diagram playbook.",
+      "Link evidence rather than pasting logs or diffs; inlined evidence buries the narrative and goes stale.",
+      "Distinguish verified claims (cited to files, commands, or links) from inference; label uncertain reasoning as a question.",
+    ],
+    pitfalls: [
+      "Do not restate the PR body, diff, or ticket file-by-file; the source documents already exist and the reader can open them.",
+      "Do not bury the answer under a diagram of the entire system when the question is about one slice of it.",
+      "Do not present inferred reasoning as verified fact; cite or label it.",
+    ],
+    lavish_notes: [
+      "A Lavish explanation should let the reader annotate the exact claim they doubt or want expanded.",
+      "When an explanation surfaces a disagreement, queue prompts that name the claim and the evidence gap.",
     ],
   },
   {

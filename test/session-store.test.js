@@ -10,6 +10,7 @@ import {
   MAX_REQUEST_ATTACHMENT_REFS,
   SessionStore,
 } from "../src/session-store.js";
+import { MAX_CHAT_STORED_BYTES, storedChatBytes } from "../src/chat-messages.js";
 
 let beginRequestSequence = 0;
 
@@ -36,7 +37,7 @@ function diagnosticPayload(load, sequence, body = {}) {
 
 function feedbackResult(result) {
   assert.equal(result.status, "feedback");
-  return /** @type {{ status: string, dom_snapshot: string, prompts: any[], artifact_failures?: any[], session_ended?: boolean, ended_by?: string }} */ (
+  return /** @type {{ status: string, dom_snapshot: string, prompts: any[], artifact_failures?: any[], session_ended?: boolean, ended_by?: string, delivery_seq?: number }} */ (
     result
   );
 }
@@ -351,6 +352,196 @@ test("reopening a session preserves the live reviewer handoff and artifact load"
   }
 });
 
+test("a replacement server preserves the live reviewer handoff and artifact load", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+  try {
+    const stateFile = path.join(dir, "state.json");
+    const artifact = path.join(dir, "artifact.html");
+    await writeFile(artifact, "<h1>Hello</h1>");
+
+    const store = new SessionStore(stateFile);
+    const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+    const handoff = await store.issueReviewerHandoff(session.key);
+    const load = await store.beginArtifactLoad(session.key, {
+      requestId: "live-load",
+      requestSequence: 1,
+      handoffToken: handoff.chrome_load_token,
+    });
+
+    // An upgrade restart hands the reviewer's already-open tab a store that has only state.json
+    // to go on. The tab did not ask for the restart and its load is still the current one.
+    const restarted = new SessionStore(stateFile);
+    const verified = await restarted.verifyArtifactLoad(session.key, load.artifact_load_token, load.artifact_revision);
+    assert.equal(verified.valid, true);
+    assert.equal(verified.artifact_load_token, load.artifact_load_token);
+
+    // A chrome rendering against a replacement server is handed the surviving load rather than a
+    // blank one, so it has something to keep on screen. (Its own store: issuing a handoff is what
+    // supersedes the reviewer below, and a render is not what this test is about.)
+    const rendered = await new SessionStore(stateFile).issueReviewerHandoff(session.key);
+    assert.equal(rendered.artifact_load_token, load.artifact_load_token);
+    assert.equal(rendered.artifact_load_sequence, 1);
+
+    // The tab that owned the review still owns it, so its next begin is not a re-handshake.
+    const resumed = await restarted.beginArtifactLoad(session.key, {
+      requestId: "resumed-load",
+      requestSequence: 2,
+      handoffToken: handoff.chrome_load_token,
+    });
+    assert.equal(resumed.stale, undefined);
+    assert.equal(resumed.artifact_revision, load.artifact_revision + 1);
+
+    // Only the restart stopped invalidating the old token; a newer begun load still does.
+    const fenced = await restarted.verifyArtifactLoad(session.key, load.artifact_load_token, load.artifact_revision);
+    assert.equal(fenced.valid, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a replacement server restores the begin fences the previous one issued", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+  try {
+    const stateFile = path.join(dir, "state.json");
+    const artifact = path.join(dir, "artifact.html");
+    await writeFile(artifact, "<h1>Hello</h1>");
+
+    const store = new SessionStore(stateFile);
+    const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+    const handoff = await store.issueReviewerHandoff(session.key);
+    const load = await store.beginArtifactLoad(session.key, {
+      requestId: "live-load",
+      requestSequence: 4,
+      handoffToken: handoff.chrome_load_token,
+    });
+
+    const restarted = new SessionStore(stateFile);
+    // A retry of the request that established the load is still that load, not a new epoch.
+    const retry = await restarted.beginArtifactLoad(session.key, {
+      requestId: "live-load",
+      requestSequence: 4,
+      handoffToken: handoff.chrome_load_token,
+    });
+    assert.equal(retry.artifact_load_token, load.artifact_load_token);
+    assert.equal(retry.artifact_revision, load.artifact_revision);
+    // ...and a request the previous server already overtook stays overtaken.
+    const outOfOrder = await restarted.beginArtifactLoad(session.key, {
+      requestId: "delayed-load",
+      requestSequence: 3,
+      handoffToken: handoff.chrome_load_token,
+    });
+    assert.equal(outOfOrder.stale, "out-of-order");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a partially stored artifact load is no load at all", async () => {
+  // Every field of the epoch is a fence some later begin is judged against, so a record missing
+  // one cannot be honored in part: restoring the token while defaulting `handoff_token` away
+  // would leave a load that answers 200 and an owner whose next begin is told `no-handoff`.
+  const fields = [
+    "artifact_load_token",
+    "artifact_revision",
+    "last_pass_sequence",
+    "request_id",
+    "request_sequence",
+    "handoff_token",
+  ];
+  for (const missing of fields) {
+    const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+    try {
+      const stateFile = path.join(dir, "state.json");
+      const artifact = path.join(dir, "artifact.html");
+      await writeFile(artifact, "<h1>Hello</h1>");
+
+      const store = new SessionStore(stateFile);
+      const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+      const handoff = await store.issueReviewerHandoff(session.key);
+      const load = await store.beginArtifactLoad(session.key, {
+        requestId: "live-load",
+        requestSequence: 1,
+        handoffToken: handoff.chrome_load_token,
+      });
+
+      const state = JSON.parse(await readFile(stateFile, "utf8"));
+      assert.ok(Object.hasOwn(state.sessions[session.key].artifact_load, missing), missing);
+      delete state.sessions[session.key].artifact_load[missing];
+      await writeFile(stateFile, `${JSON.stringify(state, null, 2)}\n`);
+
+      const restarted = new SessionStore(stateFile);
+      const verified = await restarted.verifyArtifactLoad(
+        session.key,
+        load.artifact_load_token,
+        load.artifact_revision,
+      );
+      assert.equal(verified.valid, false, `missing ${missing} was honored`);
+      assert.equal(verified.artifact_load_token, "", `missing ${missing} was reported as current`);
+
+      // ...and the review is still recoverable: a fresh handshake begins a new epoch that loads.
+      const freshHandoff = await restarted.issueReviewerHandoff(session.key);
+      const fresh = await restarted.beginArtifactLoad(session.key, {
+        requestId: "fresh-load",
+        requestSequence: freshHandoff.artifact_load_sequence + 1,
+        handoffToken: freshHandoff.chrome_load_token,
+      });
+      assert.equal(fresh.stale, undefined, `missing ${missing} blocked recovery`);
+      assert.equal(fresh.artifact_revision, load.artifact_revision + 1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a stored artifact load with a malformed fence is no load at all", async () => {
+  const corruptions = [
+    { last_pass_sequence: "soon" },
+    { request_sequence: -1 },
+    { request_id: 7 },
+    { artifact_revision: "one" },
+    { artifact_revision: null },
+    { artifact_revision: true },
+    { artifact_revision: "1" },
+    { artifact_revision: 1.5 },
+    { artifact_revision: 0 },
+    { artifact_revision: -1 },
+    { handoff_token: "" },
+    { artifact_load_token: "" },
+  ];
+  for (const corruption of corruptions) {
+    const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+    try {
+      const stateFile = path.join(dir, "state.json");
+      const artifact = path.join(dir, "artifact.html");
+      await writeFile(artifact, "<h1>Hello</h1>");
+
+      const store = new SessionStore(stateFile);
+      const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+      const handoff = await store.issueReviewerHandoff(session.key);
+      const load = await store.beginArtifactLoad(session.key, {
+        requestId: "live-load",
+        requestSequence: 1,
+        handoffToken: handoff.chrome_load_token,
+      });
+
+      const state = JSON.parse(await readFile(stateFile, "utf8"));
+      Object.assign(state.sessions[session.key].artifact_load, corruption);
+      await writeFile(stateFile, `${JSON.stringify(state, null, 2)}\n`);
+
+      const restarted = new SessionStore(stateFile);
+      const verified = await restarted.verifyArtifactLoad(
+        session.key,
+        load.artifact_load_token,
+        load.artifact_revision,
+      );
+      assert.equal(verified.valid, false, `${JSON.stringify(corruption)} was honored`);
+      assert.equal(verified.artifact_load_token, "", `${JSON.stringify(corruption)} was reported as current`);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test("typed handoff outcomes separate superseded and no-handoff begins", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
   try {
@@ -481,6 +672,49 @@ test("queueing a warning produces one ordinary prompt and leaves the warning unr
     const feedback = await store.takeFeedback(session.key);
     assert.equal(feedback.status, "feedback");
     assert.equal(feedback.prompts[0].tag, "layout-warnings");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an acknowledged layout prompt retry bypasses a later recurring-warning conflict", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+  try {
+    const stateFile = path.join(dir, "state.json");
+    const artifact = path.join(dir, "artifact.html");
+    await writeFile(artifact, "<h1>Hello</h1>");
+
+    const store = new SessionStore(stateFile);
+    const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+    const firstLoad = await beginArtifactLoad(store, session.key);
+    const finding = { selector: "p", kind: "clipped-text", axis: "vertical", overflowPx: 27, severity: "error" };
+    const recorded = await store.recordLayoutDiagnostics(
+      session.key,
+      diagnosticPayload(firstLoad, 1, { complete: true, viewport_width: 1440, findings: [finding] }),
+    );
+    const prepared = await store.prepareLayoutWarningFixes(session.key, [recorded.warnings[0].id]);
+    const prompt = {
+      ...prepared.prompt,
+      uid: "",
+      selector: "",
+      tag: "layout-warnings",
+      prompt_id: "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa",
+    };
+    await store.queuePrompts(session.key, { prompts: [prompt] });
+    assert.equal((await store.takeFeedback(session.key)).status, "feedback");
+
+    const secondLoad = await beginArtifactLoad(store, session.key);
+    const recurring = await store.recordLayoutDiagnostics(
+      session.key,
+      diagnosticPayload(secondLoad, 1, { complete: true, viewport_width: 1440, findings: [finding] }),
+    );
+    assert.equal(recurring.warnings[0].status, "recurring");
+
+    const retry = await store.queuePrompts(session.key, { prompts: [prompt] });
+    assert.equal(retry.conflict, undefined);
+    assert.equal(retry.fresh_feedback, false);
+    assert.equal(retry.chat.length, 1);
+    assert.equal(retry.prompts.length, 0);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -891,7 +1125,7 @@ test("queued prompts can atomically carry a browser end intent", async () => {
   }
 });
 
-test("late prompts after a user end preserve the ended session state", async () => {
+test("prompts queued after a session already ended are rejected, not silently stored (#171)", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
   try {
     const stateFile = path.join(dir, "state.json");
@@ -901,23 +1135,55 @@ test("late prompts after a user end preserve the ended session state", async () 
     const store = new SessionStore(stateFile);
     const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
     await store.endSession(session.key, "user");
-    await store.queuePrompts(session.key, {
+    // No agent will ever poll for this again - accepting it with a 200 would be a
+    // promise the server cannot keep, so the whole batch is rejected instead.
+    const result = await store.queuePrompts(session.key, {
       domSnapshot: 'uid=1 h1 "Hello"',
       prompts: [{ uid: "", prompt: "Late feedback", selector: "", tag: "message", text: "Freeform message" }],
     });
+    assert.equal(result.ended, true);
+    assert.equal(result.ended_by, "user");
 
     const updated = await store.findByKey(session.key);
     assert.equal(updated.status, "ended");
     assert.equal(updated.ended_by, "user");
+    assert.equal(updated.pending_prompts, 0);
 
-    const first = feedbackResult(await store.takeFeedback(session.key));
-    assert.equal(first.session_ended, true);
-    assert.equal(first.ended_by, "user");
-    assert.equal(first.prompts[0].prompt, "Late feedback");
+    const taken = await store.takeFeedback(session.key);
+    assert.equal(taken.status, "ended");
+    assert.equal(taken.ended_by, "user");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
-    const second = await store.takeFeedback(session.key);
-    assert.equal(second.status, "ended");
-    assert.equal(second.ended_by, "user");
+test("a Send & End that arrives after the session already ended is also rejected (#171)", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+  try {
+    const stateFile = path.join(dir, "state.json");
+    const artifact = path.join(dir, "artifact.html");
+    await writeFile(artifact, "<h1>Hello</h1>");
+
+    const store = new SessionStore(stateFile);
+    const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+    // The agent already ended the session; a browser tab that has not learned that yet clicks
+    // Send & End. That request also asking to end is not enough to make it deliverable - no
+    // agent will ever poll for it either way, so it must be rejected the same as a plain Send.
+    await store.endSession(session.key, "agent");
+    const result = await store.queuePrompts(session.key, {
+      domSnapshot: 'uid=1 h1 "Hello"',
+      endSession: true,
+      prompts: [{ uid: "", prompt: "Parting feedback", selector: "", tag: "message", text: "Freeform message" }],
+    });
+    assert.equal(result.ended, true);
+    assert.equal(result.ended_by, "agent");
+
+    const updated = await store.findByKey(session.key);
+    assert.equal(updated.pending_prompts, 0);
+
+    const taken = await store.takeFeedback(session.key);
+    assert.equal(taken.status, "ended");
+    assert.equal(taken.ended_by, "agent");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -1445,6 +1711,37 @@ test("restoring a taken batch preserves newer prompts, snapshot, chat, and artif
   });
 });
 
+test("restoring an accepted batch remains allowed when the session ends during delivery", async () => {
+  await withStore(async ({ store, session }) => {
+    const prompt = { uid: "A", prompt: "Accepted before end", selector: "", tag: "message", text: "" };
+    await store.queuePrompts(session.key, { domSnapshot: "accepted snapshot", prompts: [prompt] });
+    const taken = feedbackResult(await store.takeFeedback(session.key));
+
+    await store.endSession(session.key, "agent");
+    const restored = await store.queuePrompts(
+      session.key,
+      {
+        dom_snapshot: taken.dom_snapshot,
+        prompts: taken.prompts,
+        artifact_failures: taken.artifact_failures,
+      },
+      { restore: true },
+    );
+
+    assert.equal(restored.status, "ended");
+    assert.equal(restored.ended_by, "agent");
+    assert.equal(restored.pending_prompts, 1);
+
+    const feedback = feedbackResult(await store.takeFeedback(session.key));
+    assert.deepEqual(
+      feedback.prompts.map((item) => item.prompt),
+      ["Accepted before end"],
+    );
+    assert.equal(feedback.session_ended, true);
+    assert.equal(feedback.ended_by, "agent");
+  });
+});
+
 test("restoring a delivery larger than one request's attachment bound loses nothing", async () => {
   await withStore(async ({ store, session }) => {
     const resolveAttachment = async (_key, attachmentId) => ({
@@ -1599,7 +1896,7 @@ async function withStore(run) {
     await writeFile(artifact, "<h1>Hello</h1>");
     const store = new SessionStore(stateFile);
     const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
-    await run({ store, session });
+    await run({ store, session, stateFile, artifact });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -2033,4 +2330,519 @@ test("every image delivered in one poll survives, across accumulated batches (po
     const missing = delivered.filter((id) => !referenced.has(`${session.key}/${id}`));
     assert.deepEqual(missing, [], `every id in the actual delivery stays referenced (${missing.length} were not)`);
   });
+});
+
+// Every prompt the reviewer sends is part of the conversation, not only the composer messages:
+// an element note, a text selection, and a message queued together enter the chat in batch
+// order, each carrying the anchor the chrome shows. Without this the transcript only ever held
+// the agent's side and the reviewer's typed messages, and the notes that drove the changes were
+// gone from the panel the moment they were sent.
+test("every accepted prompt enters the chat history with its anchor, in batch order", async () => {
+  await withStore(async ({ store, session }) => {
+    await store.queuePrompts(session.key, {
+      prompts: [
+        { uid: "1", prompt: "Rename this", selector: "h2#phase-1", tag: "h2", text: "Phase 1: Inventory" },
+        {
+          uid: "",
+          prompt: "Say design system",
+          selector: "main > p",
+          tag: "text",
+          text: "marketing site",
+          target: {
+            type: "text-range",
+            text: "marketing site",
+            selector: "main > p",
+            commonAncestorSelector: "main > p",
+            start: { selector: "main > p", path: [], offset: 0 },
+            end: { selector: "main > p", path: [], offset: 14 },
+          },
+        },
+        { uid: "", prompt: "Keep the table", selector: "", tag: "message", text: "Freeform message" },
+      ],
+    });
+
+    const updated = await store.findByKey(session.key);
+    assert.ok(updated.chat.every((entry) => typeof entry.at === "string" && entry.at));
+    assert.deepEqual(
+      updated.chat.map(({ at: _at, ...entry }) => entry),
+      [
+        {
+          role: "user",
+          kind: "annotation",
+          text: "Rename this",
+          anchor: { kind: "element", label: "<h2>", excerpt: "Phase 1: Inventory", selector: "h2#phase-1" },
+        },
+        {
+          role: "user",
+          kind: "annotation",
+          text: "Say design system",
+          anchor: { kind: "text", label: "text", excerpt: "marketing site", selector: "main > p" },
+        },
+        { role: "user", kind: "message", text: "Keep the table" },
+      ],
+    );
+  });
+});
+
+test("queuePrompts stores the prompt identity on the transcript and not on the agent-facing prompt", async () => {
+  await withStore(async ({ store, session }) => {
+    const promptId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    await store.queuePrompts(session.key, {
+      prompts: [
+        {
+          uid: "",
+          prompt: "Rename this",
+          selector: "h2#phase-1",
+          tag: "h2",
+          text: "Phase 1: Inventory",
+          prompt_id: promptId,
+        },
+      ],
+    });
+    const updated = await store.findByKey(session.key);
+    assert.equal(updated.chat[0].prompt_id, promptId);
+    assert.equal(updated.prompts[0].prompt_id, undefined);
+    assert.equal(updated.prompts[0].prompt, "Rename this");
+  });
+});
+
+test("queuePrompts does not duplicate chat or pending prompts for an already-accepted identity", async () => {
+  await withStore(async ({ store, session }) => {
+    const promptId = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+    const prompt = {
+      uid: "",
+      prompt: "Keep this note",
+      selector: "",
+      tag: "message",
+      text: "Freeform message",
+      prompt_id: promptId,
+    };
+    await store.queuePrompts(session.key, { prompts: [prompt] });
+    await store.queuePrompts(session.key, { prompts: [prompt] });
+    const updated = await store.findByKey(session.key);
+    assert.equal(updated.chat.length, 1);
+    assert.equal(updated.prompts.length, 1);
+    assert.equal(updated.chat[0].prompt_id, promptId);
+  });
+});
+
+test("a queued prompt's chat entry keeps only the client-visible attachment fields", async () => {
+  await withStore(async ({ store, session }) => {
+    const id = "a".repeat(64) + ".png";
+    await store.queuePrompts(
+      session.key,
+      {
+        prompts: [
+          { uid: "", prompt: "", selector: "", tag: "message", text: "", attachments: [{ id, name: "shot.png" }] },
+        ],
+      },
+      {
+        resolveAttachment: async () => ({
+          id,
+          name: "shot.png",
+          path: "/private/shot.png",
+          mime: "image/png",
+          bytes: 12,
+        }),
+        maxPerPrompt: 4,
+        maxPromptBytes: 1024,
+      },
+    );
+    const updated = await store.findByKey(session.key);
+    assert.equal(updated.chat.length, 1);
+    assert.deepEqual(updated.chat[0].attachments, [{ id, name: "shot.png" }]);
+    assert.equal(updated.chat[0].text, "");
+  });
+});
+
+test("evicting chat past 5 MiB keeps prompt_id settlement and the remaining stored bytes in bound", async () => {
+  await withStore(async ({ store, session }) => {
+    const olderId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const newerId = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+    const payload = "x".repeat(Math.ceil(MAX_CHAT_STORED_BYTES / 2) + 1024);
+    const note = (id) => ({
+      uid: "",
+      prompt: payload,
+      selector: "",
+      tag: "message",
+      text: "Freeform message",
+      prompt_id: id,
+    });
+    await store.queuePrompts(session.key, { prompts: [note(olderId)] });
+    await store.queuePrompts(session.key, { prompts: [note(newerId)] });
+    const bounded = await store.findByKey(session.key);
+    assert.ok(storedChatBytes(bounded.chat) <= MAX_CHAT_STORED_BYTES);
+    assert.equal(
+      bounded.chat.some((entry) => entry.prompt_id === olderId),
+      false,
+    );
+    assert.equal(
+      bounded.chat.some((entry) => entry.prompt_id === newerId),
+      true,
+    );
+    assert.deepEqual(bounded.chat_ack_ids, [olderId]);
+    assert.equal(bounded.prompts.length, 2);
+
+    await store.queuePrompts(session.key, { prompts: [note(olderId)] });
+    const afterRetry = await store.findByKey(session.key);
+    assert.equal(afterRetry.prompts.length, 2, "an evicted identity must not re-queue for the agent");
+    assert.deepEqual(afterRetry.chat_ack_ids, [olderId]);
+    assert.equal(
+      afterRetry.chat.some((entry) => entry.prompt_id === olderId),
+      false,
+    );
+
+    const reopened = await store.upsertSession(session.file, session.url);
+    assert.deepEqual(reopened.chat_ack_ids, [olderId]);
+  });
+});
+
+test("loading bounds and persists a legacy transcript without reopening it", async () => {
+  await withStore(async ({ store, session, stateFile }) => {
+    const olderId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const newerId = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+    const state = JSON.parse(await readFile(stateFile, "utf8"));
+    state.sessions[session.key].chat = [
+      { role: "user", text: "x".repeat(Math.ceil(MAX_CHAT_STORED_BYTES / 2)), prompt_id: olderId },
+      { role: "user", text: "y".repeat(Math.ceil(MAX_CHAT_STORED_BYTES / 2)), prompt_id: newerId },
+    ];
+    await writeFile(stateFile, JSON.stringify(state));
+
+    const loaded = await store.findByKey(session.key);
+    assert.ok(storedChatBytes(loaded.chat) <= MAX_CHAT_STORED_BYTES);
+    assert.deepEqual(
+      loaded.chat.map((entry) => entry.prompt_id),
+      [newerId],
+    );
+    assert.deepEqual(loaded.chat_ack_ids, [olderId]);
+    assert.equal(loaded.chat_revision, 1);
+
+    const persisted = JSON.parse(await readFile(stateFile, "utf8")).sessions[session.key];
+    assert.deepEqual(persisted.chat, loaded.chat);
+    assert.deepEqual(persisted.chat_ack_ids, [olderId]);
+    assert.equal(persisted.chat_revision, 1);
+
+    await store.queuePrompts(session.key, {
+      prompts: [
+        {
+          uid: "",
+          prompt: "Do not send twice",
+          selector: "",
+          tag: "message",
+          text: "Freeform message",
+          prompt_id: olderId,
+        },
+      ],
+    });
+    const afterRetry = await store.findByKey(session.key);
+    assert.deepEqual(afterRetry.prompts, []);
+    assert.deepEqual(afterRetry.chat_ack_ids, [olderId]);
+    assert.equal(afterRetry.chat_revision, 1);
+  });
+});
+
+test("an oversized agent reply preserves evicted prompt acks without exceeding the hard cap", async () => {
+  await withStore(async ({ store, session }) => {
+    const olderId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    await store.queuePrompts(session.key, {
+      prompts: [
+        {
+          uid: "",
+          prompt: "Keep this note",
+          selector: "",
+          tag: "message",
+          text: "Freeform message",
+          prompt_id: olderId,
+        },
+      ],
+    });
+    await store.addAgentReply(session.key, "y".repeat(MAX_CHAT_STORED_BYTES));
+    const updated = await store.findByKey(session.key);
+    assert.deepEqual(updated.chat, []);
+    assert.ok(storedChatBytes(updated.chat) <= MAX_CHAT_STORED_BYTES);
+    assert.deepEqual(updated.chat_ack_ids, [olderId]);
+    await store.queuePrompts(session.key, {
+      prompts: [
+        {
+          uid: "",
+          prompt: "Keep this note",
+          selector: "",
+          tag: "message",
+          text: "Freeform message",
+          prompt_id: olderId,
+        },
+      ],
+    });
+    const afterRetry = await store.findByKey(session.key);
+    assert.equal(afterRetry.prompts.length, 1, "the evicted note must not be delivered twice");
+  });
+});
+
+// Delivery acks (docs/delivery-acks.md): Seen / Working / Done are stamped on the chat entry the
+// reviewer is looking at, from facts the server already records.
+
+function stampsOf(session) {
+  return session.chat
+    .filter((entry) => entry.role === "user")
+    .map((entry) => ({
+      text: entry.text,
+      delivered: Boolean(entry.delivered_at),
+      seq: entry.delivered_seq ?? null,
+      working: Boolean(entry.working_at),
+      done: Boolean(entry.done_at),
+    }));
+}
+
+test("takeFeedback stamps every undelivered user entry as seen and bumps chat_revision", async () => {
+  await withStore(async ({ store, session }) => {
+    await store.queuePrompts(session.key, {
+      prompts: [
+        { uid: "A", prompt: "First", selector: "", tag: "message", text: "" },
+        { uid: "B", prompt: "Second", selector: "h1", tag: "h1", text: "Hello" },
+      ],
+    });
+    const before = await store.findByKey(session.key);
+    assert.deepEqual(
+      stampsOf(before).map((entry) => entry.delivered),
+      [false, false],
+    );
+
+    const taken = feedbackResult(await store.takeFeedback(session.key));
+    assert.equal(taken.delivery_seq, 1, "the take reports the sequence it stamped");
+    assert.equal("delivery_seq" in taken.prompts[0], false, "the agent-facing prompts carry no stamp");
+
+    const after = await store.findByKey(session.key);
+    assert.deepEqual(stampsOf(after), [
+      { text: "First", delivered: true, seq: 1, working: false, done: false },
+      { text: "Second", delivered: true, seq: 1, working: false, done: false },
+    ]);
+    assert.ok(after.chat_revision > before.chat_revision, "a stamp change is a transcript change");
+    assert.equal(after.delivery_seq, 1);
+
+    // A take with nothing pending stamps nothing and does not advance the sequence.
+    assert.equal((await store.takeFeedback(session.key)).status, "waiting");
+    const idle = await store.findByKey(session.key);
+    assert.equal(idle.delivery_seq, 1);
+    assert.equal(idle.chat_revision, after.chat_revision);
+  });
+});
+
+test("a restored take removes only its own seen stamps and the next take re-stamps them", async () => {
+  await withStore(async ({ store, session }) => {
+    await store.queuePrompts(session.key, {
+      prompts: [{ uid: "A", prompt: "First", selector: "", tag: "message", text: "" }],
+    });
+    const pristine = await store.findByKey(session.key);
+    const taken = feedbackResult(await store.takeFeedback(session.key));
+    await store.queuePrompts(session.key, {
+      prompts: [{ uid: "B", prompt: "Second", selector: "", tag: "message", text: "" }],
+    });
+
+    const restored = await store.queuePrompts(
+      session.key,
+      { dom_snapshot: taken.dom_snapshot, prompts: taken.prompts, delivery_seq: taken.delivery_seq },
+      { restore: true },
+    );
+    assert.deepEqual(
+      restored.prompts.map((prompt) => prompt.uid),
+      ["A", "B"],
+    );
+    // Deleted, not nulled: the entry is byte-for-byte what it was before the take.
+    assert.deepEqual(restored.chat[0], pristine.chat[0]);
+    assert.deepEqual(stampsOf(restored), [
+      { text: "First", delivered: false, seq: null, working: false, done: false },
+      { text: "Second", delivered: false, seq: null, working: false, done: false },
+    ]);
+
+    const again = feedbackResult(await store.takeFeedback(session.key));
+    assert.equal(again.delivery_seq, 2);
+    assert.deepEqual(
+      stampsOf(await store.findByKey(session.key)).map((entry) => entry.seq),
+      [2, 2],
+    );
+  });
+});
+
+test("a refused restore still removes its take's seen stamps", async () => {
+  await withStore(async ({ store, session }) => {
+    const id = "a".repeat(64);
+    const attachment = { id, path: "/tmp/a.png", mime: "image/png", bytes: 1, name: "a.png" };
+    await store.queuePrompts(
+      session.key,
+      { prompts: [{ uid: "A", prompt: "First", selector: "", tag: "message", text: "", attachments: [{ id }] }] },
+      { resolveAttachment: async () => attachment },
+    );
+    const sent = await store.findByKey(session.key);
+    const taken = feedbackResult(await store.takeFeedback(session.key));
+    const seen = await store.findByKey(session.key);
+    assert.deepEqual(
+      stampsOf(seen).map((entry) => entry.delivered),
+      [true],
+    );
+
+    // The poll closed before its response was written, and the image is gone by the restore.
+    const refused = await store.queuePrompts(
+      session.key,
+      { dom_snapshot: taken.dom_snapshot, prompts: taken.prompts, delivery_seq: taken.delivery_seq },
+      { restore: true, resolveAttachment: async () => null },
+    );
+    assert.ok(refused.rejected?.length > 0, "the restore was refused");
+
+    const after = await store.findByKey(session.key);
+    assert.deepEqual(after.prompts, [], "nothing was re-queued");
+    assert.deepEqual(after.chat[0], sent.chat[0], "the note no agent received does not read Seen");
+    assert.ok(after.chat_revision > seen.chat_revision, "the chrome accepts the un-stamped transcript");
+
+    await store.addAgentReply(session.key, "About something else.");
+    assert.deepEqual(stampsOf(await store.findByKey(session.key)), [
+      { text: "First", delivered: false, seq: null, working: false, done: false },
+    ]);
+  });
+});
+
+test("a note an ended round left at seen is not marked by the next round's edit or reply", async () => {
+  await withStore(async ({ store, session, artifact }) => {
+    await store.queuePrompts(session.key, {
+      prompts: [{ uid: "A", prompt: "First", selector: "", tag: "message", text: "" }],
+    });
+    feedbackResult(await store.takeFeedback(session.key));
+    await store.endSession(session.key, "agent");
+    await store.upsertSession(artifact, "http://localhost:4387/session/test");
+    // A plain re-open of the now-open session does not move the boundary again.
+    await store.upsertSession(artifact, "http://localhost:4387/session/test");
+
+    assert.equal(await store.markWorking(session.key), null, "an edit in the new round is not about the old note");
+    await store.queuePrompts(session.key, {
+      prompts: [{ uid: "B", prompt: "Second", selector: "", tag: "message", text: "" }],
+    });
+    feedbackResult(await store.takeFeedback(session.key));
+    await store.markWorking(session.key);
+    await store.addAgentReply(session.key, "Handled the second one.");
+
+    assert.deepEqual(stampsOf(await store.findByKey(session.key)), [
+      { text: "First", delivered: true, seq: 1, working: false, done: false },
+      { text: "Second", delivered: true, seq: 2, working: true, done: true },
+    ]);
+  });
+});
+
+test("an agent reply marks delivered entries done and leaves undelivered ones alone", async () => {
+  await withStore(async ({ store, session }) => {
+    await store.queuePrompts(session.key, {
+      prompts: [{ uid: "A", prompt: "First", selector: "", tag: "message", text: "" }],
+    });
+    feedbackResult(await store.takeFeedback(session.key));
+    await store.queuePrompts(session.key, {
+      prompts: [{ uid: "B", prompt: "Second", selector: "", tag: "message", text: "" }],
+    });
+
+    await store.addAgentReply(session.key, "Done with the first one.");
+    const after = await store.findByKey(session.key);
+    assert.deepEqual(stampsOf(after), [
+      { text: "First", delivered: true, seq: 1, working: false, done: true },
+      { text: "Second", delivered: false, seq: null, working: false, done: false },
+    ]);
+    const reply = after.chat.at(-1);
+    assert.equal(reply.role, "agent");
+    assert.equal(after.chat[0].done_at, reply.at, "done is stamped with the reply's own time");
+
+    // A second reply does not re-stamp an entry that is already done.
+    await store.addAgentReply(session.key, "Anything else?");
+    assert.equal((await store.findByKey(session.key)).chat[0].done_at, reply.at);
+  });
+});
+
+test("markWorking stamps delivered entries that are not done, once, and reports whether it changed", async () => {
+  await withStore(async ({ store, session }) => {
+    await store.queuePrompts(session.key, {
+      prompts: [{ uid: "A", prompt: "First", selector: "", tag: "message", text: "" }],
+    });
+    const sent = await store.findByKey(session.key);
+    assert.equal(await store.markWorking(session.key), null, "nothing delivered yet: no stamp, no write");
+    assert.equal((await store.findByKey(session.key)).chat_revision, sent.chat_revision);
+
+    feedbackResult(await store.takeFeedback(session.key));
+    const working = await store.markWorking(session.key);
+    assert.ok(working, "a delivered entry is stamped");
+    const first = stampsOf(working);
+    assert.deepEqual(first, [{ text: "First", delivered: true, seq: 1, working: true, done: false }]);
+    const workingAt = working.chat[0].working_at;
+
+    assert.equal(await store.markWorking(session.key), null, "a second reload changes nothing");
+    assert.equal((await store.findByKey(session.key)).chat[0].working_at, workingAt);
+
+    await store.addAgentReply(session.key, "Shipped.");
+    assert.equal(await store.markWorking(session.key), null, "a done entry is never re-marked working");
+    assert.equal(await store.markWorking("missing-session"), null);
+  });
+});
+
+test("reopening a session keeps the delivery sequence and the stamps", async () => {
+  await withStore(async ({ store, session, artifact }) => {
+    await store.queuePrompts(session.key, {
+      prompts: [{ uid: "A", prompt: "First", selector: "", tag: "message", text: "" }],
+    });
+    feedbackResult(await store.takeFeedback(session.key));
+    await store.endSession(session.key, "agent");
+
+    const reopened = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+    assert.equal(reopened.delivery_seq, 1);
+    assert.deepEqual(stampsOf(reopened), [{ text: "First", delivered: true, seq: 1, working: false, done: false }]);
+  });
+});
+
+test("a transcript older than receipts is marked at load and never stamped", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+  try {
+    const stateFile = path.join(dir, "state.json");
+    const artifact = path.join(dir, "artifact.html");
+    await writeFile(artifact, "<h1>Hello</h1>");
+    const key = "legacy-session";
+    // What a pre-receipt install left behind: chat with no stamps and no delivery_seq key at all.
+    await writeFile(
+      stateFile,
+      JSON.stringify({
+        sessions: {
+          [key]: {
+            key,
+            file: artifact,
+            url: "http://localhost:4387/session/legacy",
+            status: "open",
+            pending_prompts: 0,
+            prompts: [],
+            chat: [
+              { role: "user", kind: "message", text: "From last month", at: "2026-09-01T10:00:00.000Z" },
+              { role: "agent", text: "Done then.", at: "2026-09-01T10:05:00.000Z" },
+            ],
+            chat_revision: 7,
+            updated_at: "2026-09-01T10:05:00.000Z",
+          },
+        },
+      }),
+    );
+
+    const store = new SessionStore(stateFile);
+    const loaded = await store.findByKey(key);
+    assert.equal(loaded.delivery_seq, 0);
+    assert.equal(loaded.chat[0].receipt, "none");
+    assert.equal("receipt" in loaded.chat[1], false, "agent entries are untouched");
+    const persisted = JSON.parse(await readFile(stateFile, "utf8")).sessions[key];
+    assert.equal(persisted.delivery_seq, 0, "the marker is persisted before any take can run");
+    assert.equal(persisted.chat[0].receipt, "none");
+
+    await store.queuePrompts(key, {
+      prompts: [{ uid: "A", prompt: "New note", selector: "", tag: "message", text: "" }],
+    });
+    feedbackResult(await store.takeFeedback(key));
+    await store.addAgentReply(key, "Handled the new one.");
+    const after = await store.findByKey(key);
+    assert.deepEqual(stampsOf(after), [
+      { text: "From last month", delivered: false, seq: null, working: false, done: false },
+      { text: "New note", delivered: true, seq: 1, working: false, done: true },
+    ]);
+    assert.equal(after.chat[0].receipt, "none");
+    assert.equal("receipt" in after.chat[2], false, "entries written since receipts carry no marker");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
