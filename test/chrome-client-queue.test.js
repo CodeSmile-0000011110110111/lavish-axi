@@ -54,6 +54,17 @@ function withoutReceipt(html) {
   return String(html).replace(/<div class="receipt">[\s\S]*<\/div>$/, "");
 }
 
+// A sent composer message's one row, as `chatBubbleHtml` renders it (`text` is already escaped).
+function sentRow(text) {
+  return (
+    '<div class="bubble-row"><div class="bubble-text bubble-summary" title="' +
+    text +
+    '">' +
+    text +
+    "</div><small>You</small></div>"
+  );
+}
+
 function identicalProjectionNote(offset) {
   return {
     prompt: "Make this phrase punchier",
@@ -7271,15 +7282,10 @@ test("a queued note is a dashed bubble at the end of the conversation with its a
   const html = chrome.element("queuedLog").innerHTML;
   assert.match(
     html,
-    /^<div class="bubble user queued" data-index="0"><small>Queued <button class="queued-edit"[^>]*data-index="0"/,
+    /^<div class="bubble user queued" data-index="0"><div class="bubble-row"><span class="anchor-kind" title="Phase 1: Inventory\nh2#phase-1">&lt;h2&gt;<\/span><div class="bubble-text bubble-summary queued-summary" title="Rename this">Rename this<\/div><small>Queued <button class="queued-edit"[^>]*data-index="0"/,
   );
   assert.match(html, /<button class="queued-remove"[^>]*data-index="0"/);
-  assert.match(
-    html,
-    /<span class="anchor-kind">&lt;h2&gt;<\/span><span class="anchor-excerpt">“Phase 1: Inventory”<\/span>/,
-  );
-  assert.match(html, /title="Phase 1: Inventory\nh2#phase-1"/);
-  assert.match(html, /<div class="bubble-text queued-summary" title="Rename this">Rename this<\/div>/);
+  assert.doesNotMatch(html, /anchor-excerpt/, "the anchor is a chip; its excerpt is on hover only");
   assert.equal(
     chrome.element("chatLog").children.length,
     0,
@@ -7297,13 +7303,16 @@ test("a queued note shows its words on one line and leaves the Context data bloc
   chrome.sendFrameMessage({ type: "lavish:queuePrompt", prompt: { prompt, tag: "message" } });
 
   const html = chrome.element("queuedLog").innerHTML;
-  assert.match(html, /<div class="bubble-text queued-summary" title="[^"]*">R1-Q5: B Keep the sidebar fixed<\/div>/);
+  assert.match(
+    html,
+    /<div class="bubble-text bubble-summary queued-summary" title="[^"]*">R1-Q5: B Keep the sidebar fixed<\/div>/,
+  );
   assert.doesNotMatch(
     html,
     /Context data|&quot;choice&quot;/,
     "the JSON block is in neither the bubble text nor its title",
   );
-  const title = html.match(/class="bubble-text queued-summary" title="([^"]*)"/)?.[1];
+  const title = html.match(/class="bubble-text bubble-summary queued-summary" title="([^"]*)"/)?.[1];
   assert.equal(title, "R1-Q5: B\nKeep the\tsidebar fixed", "the hover title is the words with their line breaks");
   assert.equal(chrome.queued()[0].prompt, prompt, "the queued prompt itself keeps its data for the agent");
 });
@@ -7321,7 +7330,9 @@ test("a queued note cuts a Context data heading with other spacing or line endin
 
   const html = chrome.element("queuedLog").innerHTML;
   assert.deepEqual(
-    [...html.matchAll(/class="bubble-text queued-summary" title="[^"]*">([^<]*)</g)].map((match) => match[1]),
+    [...html.matchAll(/class="bubble-text bubble-summary queued-summary" title="[^"]*">([^<]*)</g)].map(
+      (match) => match[1],
+    ),
     ["Answer A", "Answer B", "Answer C"],
   );
   assert.doesNotMatch(html, /Context data|choice/);
@@ -7360,7 +7371,59 @@ test("a queued note made only of Context data names the block instead of showing
 
   assert.match(
     chrome.element("queuedLog").innerHTML,
-    /<div class="bubble-text queued-summary" title="[^"]*">Context data<\/div>/,
+    /<div class="bubble-text bubble-summary queued-summary" title="[^"]*">Context data<\/div>/,
+  );
+});
+
+// A board answer queued from a choice form carries a multi-line answer as both its words and the
+// element text the SDK reads from the form. The queued bubble is still one row: the anchor is a
+// chip with the form's text on hover only, and the words are one line before any Context data.
+test("a queued choice answer with long words and Context data is one row with no answer excerpt or JSON", async () => {
+  const chrome = await createChromeHarness();
+  const words = "R2-Q1: B\nShip the compact row.\nIt keeps every queued answer to a single line in the panel.";
+  const prompt = words + '\n\nContext data:\n{\n  "question": "R2-Q1",\n  "choice": "B"\n}';
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt, selector: "main > form#r2-q1", tag: "choice", text: words.replace(/\s+/g, " ") },
+  });
+
+  const html = chrome.element("queuedLog").innerHTML;
+  const row = html.match(
+    /^<div class="bubble user queued" data-index="0"><div class="bubble-row">([\s\S]*?)<\/div><\/div>$/,
+  );
+  assert.ok(row, "the bubble holds exactly one row");
+  assert.match(row[1], /^<span class="anchor-kind" title="[^"]*">&lt;choice&gt;<\/span>/);
+  assert.match(
+    row[1],
+    /<div class="bubble-text bubble-summary queued-summary" title="[^"]*">R2-Q1: B Ship the compact row\. It keeps every queued answer to a single line in the panel\.<\/div>/,
+  );
+  assert.doesNotMatch(html, /class="anchor"|anchor-excerpt/, "no anchor line repeats the answer");
+  assert.doesNotMatch(html, /Context data|&quot;choice&quot;/);
+});
+
+// Once sent, the same answer settles as a one-row transcript bubble: the Context data block stays
+// in the transcript text the agent received and is left out of the bubble and its hover.
+test("a sent note with Context data shows its words on one row and leaves the JSON out", async () => {
+  const chrome = await createChromeHarness();
+  const text = 'R2-Q1: B\nShip it\n\nContext data:\n{\n  "choice": "B"\n}';
+  chrome.eventSource().listeners.get("chat-sync")({
+    data: JSON.stringify({
+      chat: [
+        {
+          role: "user",
+          kind: "annotation",
+          text,
+          anchor: { kind: "element", label: "<choice>", excerpt: "R2-Q1: B Ship it", selector: "form" },
+        },
+      ],
+    }),
+  });
+
+  const html = withoutReceipt(chrome.element("chatLog").children[0].innerHTML);
+  assert.equal(
+    html,
+    '<div class="bubble-row"><span class="anchor-kind" title="R2-Q1: B Ship it\nform">&lt;choice&gt;</span>' +
+      '<div class="bubble-text bubble-summary" title="R2-Q1: B\nShip it">R2-Q1: B Ship it</div><small>You</small></div>',
   );
 });
 
@@ -7449,16 +7512,13 @@ test("the chrome's queued anchor agrees with the server's transcript anchor for 
     chrome.sendFrameMessage({ type: "lavish:queuePrompt", prompt: fixture });
     const html = chrome.element("queuedLog").innerHTML;
     const expected = chatEntryForPrompt({ uid: "", ...fixture }, "2026-09-15T00:00:00.000Z").anchor;
-    const rendered = html.match(
-      /<div class="anchor" title="([^"]*)"><span class="anchor-kind">([^<]*)<\/span>(?:<span class="anchor-excerpt(?: text)?">([^<]*)<\/span>)?<\/div>/,
-    );
+    const rendered = html.match(/<span class="anchor-kind" title="([^"]*)">([^<]*)<\/span>/);
     if (!expected) {
       assert.equal(rendered, null, `${fixture.tag}: no anchor`);
       continue;
     }
     assert.ok(rendered, `${fixture.tag}: anchor rendered`);
     assert.equal(unescape(rendered[2]), expected.label, `${fixture.tag}: label`);
-    assert.equal(unescape(rendered[3] || ""), "“" + expected.excerpt + "”", `${fixture.tag}: excerpt`);
     assert.equal(
       unescape(rendered[1]),
       [expected.excerpt, expected.selector].filter(Boolean).join("\n"),
@@ -7517,10 +7577,9 @@ test("a sent batch settles in place: notes read Sending until the server's trans
   assert.equal(bubbles.length, 2);
   assert.match(
     bubbles[0].innerHTML,
-    /^<small>You<\/small><div class="anchor" [^>]*><span class="anchor-kind">&lt;h2&gt;<\/span>/,
+    /^<div class="bubble-row"><span class="anchor-kind" [^>]*>&lt;h2&gt;<\/span><div class="bubble-text bubble-summary" title="Rename this">Rename this<\/div><small>You<\/small><\/div>/,
   );
-  assert.match(bubbles[0].innerHTML, /<div class="bubble-text">Rename this<\/div>/);
-  assert.equal(withoutReceipt(bubbles[1].innerHTML), '<small>You</small><div class="bubble-text">Keep the table</div>');
+  assert.equal(withoutReceipt(bubbles[1].innerHTML), sentRow("Keep the table"));
 });
 
 test("an accepted note merges before live entries that arrived before its response", async () => {
@@ -7557,11 +7616,7 @@ test("an accepted note merges before live entries that arrived before its respon
 
     const bubbles = chrome.element("chatLog").children;
     assert.equal(bubbles.length, 2, eventName);
-    assert.equal(
-      withoutReceipt(bubbles[0].innerHTML),
-      '<small>You</small><div class="bubble-text">Sent note</div>',
-      eventName,
-    );
+    assert.equal(withoutReceipt(bubbles[0].innerHTML), sentRow("Sent note"), eventName);
     assert.equal(bubbles[1].innerHTML, '<small>Agent</small><div class="chat-md"><p>Newer reply</p></div>', eventName);
     assert.equal(chrome.element("queuedLog").innerHTML, "", eventName);
   }
@@ -8063,10 +8118,7 @@ test("an older live sync does not hide the transcript accepted by the prompts re
 
   assert.equal(chrome.element("queuedLog").innerHTML, "");
   assert.equal(chrome.element("chatLog").children.length, 1);
-  assert.equal(
-    withoutReceipt(chrome.element("chatLog").children[0].innerHTML),
-    '<small>You</small><div class="bubble-text">Sent note</div>',
-  );
+  assert.equal(withoutReceipt(chrome.element("chatLog").children[0].innerHTML), sentRow("Sent note"));
 });
 
 test("a stale prompts response cannot remove a newer concurrent note", async () => {
@@ -8264,14 +8316,8 @@ test("a synced transcript renders sent notes with anchors and thumbnails and nev
     }),
   });
   const [message, note, reply] = chrome.element("chatLog").children;
-  assert.equal(
-    withoutReceipt(message.innerHTML),
-    '<small>You</small><div class="bubble-text">&lt;b&gt;bold&lt;/b&gt;</div>',
-  );
-  assert.match(
-    note.innerHTML,
-    /<span class="anchor-kind">text<\/span><span class="anchor-excerpt text">“&lt;i&gt;sel&lt;\/i&gt;”<\/span>/,
-  );
+  assert.equal(withoutReceipt(message.innerHTML), sentRow("&lt;b&gt;bold&lt;/b&gt;"));
+  assert.match(note.innerHTML, /<span class="anchor-kind" title="&lt;i&gt;sel&lt;\/i&gt;\np">text<\/span>/);
   assert.equal(note.innerHTML.match(/class="bubble-attachment"/g)?.length, 4);
   assert.match(note.innerHTML, /class="bubble-attachment-more"[^>]*>\+2</);
   assert.equal(reply.innerHTML, '<small>Agent</small><div class="chat-md"><p>ok</p></div>');
@@ -9021,9 +9067,9 @@ test("a transcript entry from before receipts renders no receipt and ignores pre
     },
   });
   const bubbles = chrome.element("chatLog").children;
-  assert.equal(bubbles[0].innerHTML, '<small>You</small><div class="bubble-text">Old note</div>');
+  assert.equal(bubbles[0].innerHTML, sentRow("Old note"));
   assert.deepEqual(receiptSteps(bubbles[1].innerHTML), [false, false, false]);
   chrome.eventSource().listeners.get("agent-presence")({ data: JSON.stringify({ state: "working" }) });
-  assert.equal(bubbles[0].innerHTML, '<small>You</small><div class="bubble-text">Old note</div>');
+  assert.equal(bubbles[0].innerHTML, sentRow("Old note"));
   assert.equal(receiptNote(bubbles[1].innerHTML), "Agent is busy; delivered on its next poll");
 });

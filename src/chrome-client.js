@@ -611,11 +611,6 @@ function attachmentOnlyText(entry) {
   return entry.tag === "message" || entry.kind === "message" ? "Image message" : "Image annotation";
 }
 
-function userBubbleTextHtml(entry, text) {
-  const displayText = String(text || attachmentOnlyText(entry));
-  return displayText ? '<div class="bubble-text">' + escapeHtml(displayText) + "</div>" : "";
-}
-
 // `window.lavish.queuePrompt(text, { data })` appends its data to the prompt under a
 // "Context data:" heading line (src/artifact-sdk.js). test/artifact-sdk-bundle.test.js pins the SDK
 // side of it. The heading is matched as a whole line, with any surrounding spaces or line endings.
@@ -631,23 +626,46 @@ function splitQueuedPrompt(promptText) {
   return { words: words.trim(), data: body.slice(words.trimEnd().length) };
 }
 
-// A queued note's one-line text: its words before any Context data block, whitespace collapsed.
+// A user note's one-line text, queued or sent: its words before any Context data block,
+// whitespace collapsed.
 // A note that is only a data block names the block.
 function queuedSummaryText(promptText) {
   const { words, data } = splitQueuedPrompt(promptText);
   return words.replace(/\s+/g, " ").trim() || (data ? "Context data" : "");
 }
 
-// The queued bubble's text is one line, so a run of board answers stays one row each; the words
-// with their line breaks are on hover. The Context data block is in neither.
-function queuedBubbleTextHtml(prompt) {
-  const summary = queuedSummaryText(prompt.prompt) || attachmentOnlyText(prompt);
+// A user bubble's anchor as a chip on its one row: the kind label only (`<h2>`, `text`, `choice`),
+// with the excerpt and selector on hover. The editor keeps the full anchor line.
+function anchorChipHtml(anchor) {
+  if (!anchor || typeof anchor !== "object") return "";
+  const title = [String(anchor.excerpt || ""), anchor.selector].filter(Boolean).join("\n");
+  return '<span class="anchor-kind" title="' + escapeHtml(title) + '">' + escapeHtml(anchor.label || "") + "</span>";
+}
+
+// A user bubble's text is one line, queued or sent, so a run of board answers stays one row each;
+// the words with their line breaks are on hover. The Context data block is in neither.
+function userSummaryHtml(entry, text, extraClass) {
+  const summary = queuedSummaryText(text) || attachmentOnlyText(entry);
   if (!summary) return "";
   return (
-    '<div class="bubble-text queued-summary" title="' +
-    escapeHtml(splitQueuedPrompt(prompt.prompt).words || summary) +
+    '<div class="bubble-text bubble-summary' +
+    extraClass +
+    '" title="' +
+    escapeHtml(splitQueuedPrompt(text).words || summary) +
     '">' +
     escapeHtml(summary) +
+    "</div>"
+  );
+}
+
+// The one row of a user bubble: anchor chip, one-line words, then the label (with the queued
+// note's edit and remove controls) at the end.
+function userBubbleRowHtml(entry, anchor, text, extraClass, labelHtml) {
+  return (
+    '<div class="bubble-row">' +
+    anchorChipHtml(anchor) +
+    userSummaryHtml(entry, text, extraClass) +
+    labelHtml +
     "</div>"
   );
 }
@@ -663,19 +681,24 @@ function queuedBubbleHtml(prompt, index) {
   return (
     '<div class="bubble user queued" data-index="' +
     index +
-    '"><small>' +
-    (sending ? "Sending\u2026" : "Queued") +
-    ' <button class="queued-edit" type="button" aria-label="Edit queued prompt" data-index="' +
-    index +
     '">' +
-    EDIT_ICON_SVG +
-    '</button><button class="queued-remove" type="button" aria-label="Remove queued prompt" data-index="' +
-    index +
-    '">' +
-    REMOVE_ICON_SVG +
-    "</button></small>" +
-    anchorHtml(promptAnchor(prompt)) +
-    queuedBubbleTextHtml(prompt) +
+    userBubbleRowHtml(
+      prompt,
+      promptAnchor(prompt),
+      prompt.prompt,
+      " queued-summary",
+      "<small>" +
+        (sending ? "Sending\u2026" : "Queued") +
+        ' <button class="queued-edit" type="button" aria-label="Edit queued prompt" data-index="' +
+        index +
+        '">' +
+        EDIT_ICON_SVG +
+        '</button><button class="queued-remove" type="button" aria-label="Remove queued prompt" data-index="' +
+        index +
+        '">' +
+        REMOVE_ICON_SVG +
+        "</button></small>",
+    ) +
     bubbleAttachmentsHtml(prompt) +
     "</div>"
   );
@@ -968,9 +991,7 @@ function chatBubbleHtml(entry) {
     );
   }
   return (
-    "<small>You</small>" +
-    anchorHtml(entry.anchor) +
-    userBubbleTextHtml(entry, entry.text) +
+    userBubbleRowHtml(entry, entry.anchor, entry.text, "", "<small>You</small>") +
     bubbleAttachmentsHtml(entry) +
     receiptHtml(entry)
   );
