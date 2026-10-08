@@ -216,7 +216,7 @@ test(
         });
       }`);
       assert.equal(queuedRow.text, answer);
-      assert.equal(queuedRow.title, queuedPrompt);
+      assert.equal(queuedRow.title, answer, "the hover title leaves the Context data block out");
       assert.ok(
         queuedRow.height < 2 * queuedRow.fontSize,
         `the queued answer is one line: ${JSON.stringify(queuedRow)}`,

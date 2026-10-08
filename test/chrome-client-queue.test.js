@@ -7289,7 +7289,8 @@ test("a queued note is a dashed bubble at the end of the conversation with its a
 
 // A board answer queued with `window.lavish.queuePrompt(text, { data })` carries its data as a JSON
 // block the SDK appends under "Context data:". The queued bubble is one line: the answer's words
-// only, with the whole prompt on hover, so a run of answers does not fill the panel with JSON.
+// only, with the words' own line breaks on hover, so a run of answers does not fill the panel
+// with JSON. The JSON stays in the queued prompt the agent receives.
 test("a queued note shows its words on one line and leaves the Context data block out of the bubble", async () => {
   const chrome = await createChromeHarness();
   const prompt = 'R1-Q5: B\nKeep the\tsidebar fixed\n\nContext data:\n{\n  "question": "R1-Q5",\n  "choice": "B"\n}';
@@ -7297,10 +7298,57 @@ test("a queued note shows its words on one line and leaves the Context data bloc
 
   const html = chrome.element("queuedLog").innerHTML;
   assert.match(html, /<div class="bubble-text queued-summary" title="[^"]*">R1-Q5: B Keep the sidebar fixed<\/div>/);
-  assert.doesNotMatch(html, />[^<]*Context data/, "the JSON block is not bubble text");
+  assert.doesNotMatch(
+    html,
+    /Context data|&quot;choice&quot;/,
+    "the JSON block is in neither the bubble text nor its title",
+  );
   const title = html.match(/class="bubble-text queued-summary" title="([^"]*)"/)?.[1];
-  assert.equal(title.replaceAll("&quot;", '"'), prompt, "the full prompt stays readable on hover");
+  assert.equal(title, "R1-Q5: B\nKeep the\tsidebar fixed", "the hover title is the words with their line breaks");
   assert.equal(chrome.queued()[0].prompt, prompt, "the queued prompt itself keeps its data for the agent");
+});
+
+// The heading is matched by line, so spacing or line-ending variants of it are cut too.
+test("a queued note cuts a Context data heading with other spacing or line endings", async () => {
+  const chrome = await createChromeHarness();
+  for (const prompt of [
+    'Answer A\nContext data:\n{"choice":"A"}',
+    'Answer B\r\n\r\nContext data:  \r\n{"choice":"B"}',
+    'Answer C\n\n  Context data:\n{"choice":"C"}',
+  ]) {
+    chrome.sendFrameMessage({ type: "lavish:queuePrompt", prompt: { prompt, tag: "message" } });
+  }
+
+  const html = chrome.element("queuedLog").innerHTML;
+  assert.deepEqual(
+    [...html.matchAll(/class="bubble-text queued-summary" title="[^"]*">([^<]*)</g)].map((match) => match[1]),
+    ["Answer A", "Answer B", "Answer C"],
+  );
+  assert.doesNotMatch(html, /Context data|choice/);
+});
+
+// Clicking a queued answer, or the board form it is anchored to, opens the editor. The editor holds
+// only the words; the data block is put back after them on save, so the agent still receives it.
+test("editing a queued board answer shows only its words and keeps its Context data block", async () => {
+  const chrome = await createChromeHarness();
+  const data = '\n\nContext data:\n{\n  "question": "R1-Q5",\n  "choice": "B"\n}';
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "R1-Q5: B\nkeep it" + data, selector: "main > form", tag: "choice", text: "R1-Q5: B" },
+  });
+
+  chrome.element("queuedLog").dispatch("click", { target: queuedLogNode(["bubble", "queued"], 0) });
+  const editing = chrome.element("queuedLog").innerHTML;
+  assert.match(editing, /class="queued-edit-input"[^>]*>R1-Q5: B\nkeep it</);
+  assert.doesNotMatch(editing, /Context data|&quot;choice&quot;/);
+
+  typeIntoQueuedEdit(chrome, "R1-Q5: B, but later");
+  queuedLogKey(chrome, "Enter");
+  assert.equal(chrome.queued()[0].prompt, "R1-Q5: B, but later" + data);
+
+  chrome.element("queuedLog").dispatch("click", { target: queuedLogNode(["bubble", "queued"], 0) });
+  queuedLogKey(chrome, "Enter");
+  assert.equal(chrome.queued()[0].prompt, "R1-Q5: B, but later" + data, "saving unchanged words changes nothing");
 });
 
 test("a queued note made only of Context data names the block instead of showing the JSON", async () => {

@@ -616,27 +616,36 @@ function userBubbleTextHtml(entry, text) {
   return displayText ? '<div class="bubble-text">' + escapeHtml(displayText) + "</div>" : "";
 }
 
-// `window.lavish.queuePrompt(text, { data })` appends its data to the prompt under this heading
-// (src/artifact-sdk.js). test/artifact-sdk-bundle.test.js pins the SDK side of it.
-const CONTEXT_DATA_HEADING = "\n\nContext data:\n";
+// `window.lavish.queuePrompt(text, { data })` appends its data to the prompt under a
+// "Context data:" heading line (src/artifact-sdk.js). test/artifact-sdk-bundle.test.js pins the SDK
+// side of it. The heading is matched as a whole line, with any surrounding spaces or line endings.
+const CONTEXT_DATA_HEADING = /(?:^|\r?\n)[ \t]*Context data:[ \t]*\r?\n/;
+
+// A queued prompt split into the words the reviewer sees and edits, and the Context data block
+// (heading included, with the blank lines before it) that only the agent reads.
+function splitQueuedPrompt(promptText) {
+  const body = String(promptText || "");
+  const match = CONTEXT_DATA_HEADING.exec(body);
+  if (!match) return { words: body.trim(), data: "" };
+  const words = body.slice(0, match.index);
+  return { words: words.trim(), data: body.slice(words.trimEnd().length) };
+}
 
 // A queued note's one-line text: its words before any Context data block, whitespace collapsed.
 // A note that is only a data block names the block.
 function queuedSummaryText(promptText) {
-  const body = String(promptText || "");
-  const cut = body.indexOf(CONTEXT_DATA_HEADING);
-  const words = (cut === -1 ? body : body.slice(0, cut)).replace(/\s+/g, " ").trim();
-  return words || (cut === -1 ? "" : "Context data");
+  const { words, data } = splitQueuedPrompt(promptText);
+  return words.replace(/\s+/g, " ").trim() || (data ? "Context data" : "");
 }
 
-// The queued bubble's text is one line, so a run of board answers stays one row each; the whole
-// prompt, data block included, is on hover.
+// The queued bubble's text is one line, so a run of board answers stays one row each; the words
+// with their line breaks are on hover. The Context data block is in neither.
 function queuedBubbleTextHtml(prompt) {
   const summary = queuedSummaryText(prompt.prompt) || attachmentOnlyText(prompt);
   if (!summary) return "";
   return (
     '<div class="bubble-text queued-summary" title="' +
-    escapeHtml(String(prompt.prompt || summary)) +
+    escapeHtml(splitQueuedPrompt(prompt.prompt).words || summary) +
     '">' +
     escapeHtml(summary) +
     "</div>"
@@ -1587,7 +1596,7 @@ function editQueuedPrompt(index, { reveal = true } = {}) {
   // Moving to another note keeps what was typed into the first, the way leaving a field does.
   commitQueuedEdit();
   editingPromptId = id;
-  editingDraft = String(prompt.prompt || "");
+  editingDraft = splitQueuedPrompt(prompt.prompt).words;
   editFocusPending = true;
   if (isMobileSheet()) setSheetOpen(true);
   else revealConversation();
@@ -1609,12 +1618,15 @@ function commitQueuedEdit() {
   endQueuedEdit();
   const prompt = queued[index];
   if (!isPromptEditable(prompt)) return false;
+  // The editor holds only the words; a board answer's Context data block goes back after them.
+  const { words, data } = splitQueuedPrompt(prompt.prompt);
+  if (text === words) return false;
   if (!text && !attachmentCount(prompt)) {
     queued.splice(index, 1);
     afterQueuedPromptRemoved();
   } else {
     // In place, not replaced: the send bookkeeping tracks notes by object identity.
-    prompt.prompt = text;
+    prompt.prompt = text + data;
     persistQueuedPrompts();
   }
   return true;
@@ -1758,7 +1770,7 @@ function enqueuePrompt(rawPrompt, /** @type {FeedbackPreparation | null} */ prep
       if (editingPromptId && promptIdentity(queued[index]) === editingPromptId) {
         const draft = editingDraft.trim();
         endQueuedEdit();
-        if (draft !== String(queued[index].prompt || "").trim()) keepRetiredDraft(draft);
+        if (draft !== splitQueuedPrompt(queued[index].prompt).words) keepRetiredDraft(draft);
       }
       queued[index] = prompt;
     } else {

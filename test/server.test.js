@@ -3590,6 +3590,33 @@ test("/chrome.css serves the extracted chrome stylesheet", async () => {
   }
 });
 
+// A browser that keeps an old chrome-client.js or chrome.css after Lavish is upgraded renders the
+// old chrome against the new server. The chrome page and both assets are fetched fresh every load.
+test("the chrome page, chrome-client.js, and chrome.css are served with cache-control: no-store", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body><h1>hi</h1></body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    const { key } = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    }).then((res) => res.json());
+
+    for (const route of [`/session/${key}`, "/chrome-client.js", "/chrome.css"]) {
+      const res = await fetch(`${base}${route}`);
+      await res.arrayBuffer();
+      assert.equal(res.status, 200, route);
+      assert.equal(res.headers.get("cache-control"), "no-store", route);
+    }
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("/design serves local Tailwind and DaisyUI artifact assets", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
