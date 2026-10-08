@@ -11,10 +11,11 @@ const sourceUrl = new URL("../src/chrome-client.js", import.meta.url);
 // The ids the served chrome page actually declares. The client reaches for these by id, so a page
 // that stopped declaring one would leave the corresponding feature silently dead behind an
 // `if (element)` guard - a harness that invents an element for any id would never notice.
-const servedChromeIds = new Set(
-  [...createChromeHtml({ key: "abc", file: "/tmp/artifact.html" }).matchAll(/\sid="([^"]+)"/g)].map(
-    (match) => match[1],
-  ),
+const servedChromeHtml = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
+const servedChromeIds = new Set([...servedChromeHtml.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]));
+// Elements the served page marks `hidden`, so a fake element starts hidden exactly when the real one does.
+const servedHiddenIds = new Set(
+  [...servedChromeHtml.matchAll(/<[a-z]+\b[^>]*\sid="([^"]+)"[^>]*\shidden[\s>]/g)].map((match) => match[1]),
 );
 
 /** @typedef {{ key: string, file: string, layoutGateEnabled?: boolean, layoutGateMaxHoldMs?: number, modeToggleHotkeyKey?: string, initialChat?: any[], initialChatAckIds?: string[], initialChatRevision?: number, initialLayoutWarnings?: any[], chromeLoadToken?: string, initialArtifactRevision?: number, initialArtifactLoadToken?: string, initialArtifactLoadSequence?: number, attachmentMaxBytes?: number, attachmentMaxCount?: number, attachmentAcceptedMime?: string[], initialEnded?: boolean, initialEndedBy?: string | null, revisionPalette?: { hex: string, borderStyle: string, pattern: string }[] }} HarnessSessionData */
@@ -77,6 +78,8 @@ async function createChromeHarness({
   sessionData = defaultSessionData,
   artifactSrc = "",
   storage = new Map(),
+  // localStorage is per browser, not per tab: the desktop sidebar preference lives here.
+  localStore = new Map(),
   beginLoadResponses = [],
   handoffResponses = [],
   storedQueue = null,
@@ -139,7 +142,7 @@ async function createChromeHarness({
     const classes = new Set();
     const el = {
       id,
-      hidden: false,
+      hidden: servedHiddenIds.has(id),
       disabled: false,
       checked: false,
       indeterminate: false,
@@ -468,6 +471,17 @@ async function createChromeHarness({
         storage.delete(key);
       },
     },
+    localStorage: {
+      getItem(key) {
+        return localStore.has(key) ? localStore.get(key) : null;
+      },
+      setItem(key, value) {
+        localStore.set(key, String(value));
+      },
+      removeItem(key) {
+        localStore.delete(key);
+      },
+    },
     window: {
       clearTimeout: fakeClearTimeout,
       setTimeout: fakeSetTimeout,
@@ -619,6 +633,7 @@ async function createChromeHarness({
     },
     focusLog,
     storage,
+    localStore,
     warningRows() {
       return element("warningsList").children.filter((child) => String(child.className).startsWith("warning-row"));
     },
@@ -7123,6 +7138,136 @@ test("crossing the breakpoint in either direction leaves no sheet state behind",
   assert.equal(state.scrollInert, true);
   assert.equal(chrome.focusLog.at(-1), "panelToggle");
   assert.equal(chrome.storage.has("lavish-axi:sheet-open:abc"), false);
+});
+
+// ---- Desktop conversation sidebar ----
+
+function sidebarState(chrome) {
+  const toggle = chrome.element("conversationToggle");
+  const status = chrome.element("conversationStatus");
+  return {
+    hidden: chrome.element("body").classList.contains("conversation-hidden"),
+    panelInert: Boolean(chrome.element("panel").inert),
+    pressed: toggle["aria-pressed"],
+    title: toggle.title,
+    status: status.hidden ? null : status.textContent,
+    stored: chrome.localStore.get("lavish-axi:conversation-hidden") || null,
+  };
+}
+
+test("the toolbar Conversation switch hides and restores the desktop sidebar and remembers the choice", async () => {
+  const chrome = await createChromeHarness();
+
+  let state = sidebarState(chrome);
+  assert.equal(state.hidden, false);
+  assert.equal(state.panelInert, false);
+  assert.equal(state.pressed, "true");
+  assert.equal(state.title, "Hide conversation");
+  assert.equal(state.status, null, "the toolbar says nothing while the panel itself is visible");
+
+  chrome.element("chatInput").value = "Keep this draft";
+  chrome.element("conversationToggle").dispatch("click", {});
+  state = sidebarState(chrome);
+  assert.equal(state.hidden, true);
+  assert.equal(state.panelInert, true, "the hidden panel is unreachable by keyboard");
+  assert.equal(state.pressed, "false");
+  assert.equal(state.title, "Show conversation");
+  assert.equal(state.status, "Agent not listening");
+  assert.equal(state.stored, "1");
+  assert.equal(chrome.element("chatInput").value, "Keep this draft", "hiding keeps the composer draft");
+
+  chrome.element("conversationToggle").dispatch("click", {});
+  state = sidebarState(chrome);
+  assert.equal(state.hidden, false);
+  assert.equal(state.panelInert, false);
+  assert.equal(state.status, null);
+  assert.equal(state.stored, null);
+});
+
+test("a hidden desktop sidebar stays hidden across a chrome reload and in other reviews", async () => {
+  const localStore = new Map([["lavish-axi:conversation-hidden", "1"]]);
+  const chrome = await createChromeHarness({
+    localStore,
+    sessionData: { ...defaultSessionData, key: "another-review" },
+  });
+
+  const state = sidebarState(chrome);
+  assert.equal(state.hidden, true);
+  assert.equal(state.panelInert, true);
+  assert.equal(state.pressed, "false");
+});
+
+test("the toolbar reports queued notes and unread replies while the sidebar is hidden", async () => {
+  const chrome = await createChromeHarness({ fetchImpl: async () => ({ ok: true, json: async () => ({}) }) });
+  chrome.element("conversationToggle").dispatch("click", {});
+
+  chrome.eventSource().listeners.get("agent-presence")({ data: JSON.stringify({ state: "listening" }) });
+  assert.equal(sidebarState(chrome).status, "Agent listening");
+
+  chrome.eventSource().listeners.get("agent-reply")({ data: JSON.stringify({ text: "Renamed the payment step." }) });
+  assert.equal(sidebarState(chrome).status, "New reply");
+
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "Call this Payment method", selector: "h2", tag: "element", text: "Payment" },
+  });
+  assert.equal(sidebarState(chrome).status, "1 queued");
+  assert.equal(sidebarState(chrome).hidden, true, "queueing from the artifact leaves the sidebar hidden");
+
+  // Showing the sidebar shows the reply, so hiding it again owes no unread report.
+  chrome.element("conversationToggle").dispatch("click", {});
+  chrome.element("conversationToggle").dispatch("click", {});
+  assert.equal(sidebarState(chrome).status, "1 queued");
+});
+
+test("a new notice or send warning reveals the hidden desktop sidebar", async () => {
+  const chrome = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html" });
+
+  chrome.element("conversationToggle").dispatch("click", {});
+  sendChromeOutdated(chrome, "upgrade");
+  await flushPromises();
+  assert.equal(chrome.element("outdatedBanner").hidden, false);
+  assert.equal(sidebarState(chrome).hidden, false, "the server notice is shown where it can be acted on");
+
+  // Hiding again while the same notice stands keeps it hidden and names the notice in the toolbar.
+  chrome.element("conversationToggle").dispatch("click", {});
+  sendChromeOutdated(chrome, "upgrade");
+  await flushPromises();
+  assert.equal(sidebarState(chrome).hidden, true);
+  assert.match(sidebarState(chrome).status, /^Server notice · /);
+
+  chrome.element("outdatedDismiss").click();
+  chrome.element("send").click();
+  assert.equal(chrome.element("sendHint").hidden, false);
+  assert.equal(sidebarState(chrome).hidden, false, "an empty-send warning reveals the composer it points at");
+});
+
+test("hiding the sidebar moves focus out of it to the toolbar switch", async () => {
+  const chrome = await createChromeHarness();
+  const input = chrome.element("chatInput");
+  input.parentElement = chrome.element("panel");
+  input.focus();
+
+  chrome.element("conversationToggle").dispatch("click", {});
+  assert.equal(chrome.focusLog.at(-1), "conversationToggle");
+});
+
+test("a hidden desktop sidebar never hides the phone dock, and returns when the window widens again", async () => {
+  const localStore = new Map([["lavish-axi:conversation-hidden", "1"]]);
+  const chrome = await createChromeHarness({ mobile: true, localStore });
+
+  let state = sidebarState(chrome);
+  assert.equal(state.hidden, false, "the phone layout ignores the desktop preference");
+  assert.equal(state.panelInert, false, "the dock stays reachable");
+  assert.equal(state.status, null);
+  chrome.element("panelHead").dispatch("click", {});
+  assert.equal(sheetState(chrome).open, true);
+
+  chrome.setMobile(false);
+  state = sidebarState(chrome);
+  assert.equal(state.hidden, true);
+  assert.equal(state.panelInert, true);
+  assert.equal(state.stored, "1");
 });
 
 // ---- Queued and sent notes are one conversation ----

@@ -126,8 +126,10 @@ test(
       return value;
     }
 
+    // A plain pause on this side: chrome-devtools-axi 0.1.34 fails `wait <ms>` with
+    // "fn is not a function", and the steps between commands only need the page to settle.
     function wait(ms) {
-      run("chrome-devtools-axi", ["wait", String(ms)], chromeEnv, ms + 45_000);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
     }
 
     function emulate(viewport) {
@@ -239,6 +241,9 @@ test(
         );
       }
 
+      // Emulation needs a selected page.
+      open(url, 1000);
+
       // ---- Portrait phone ----
       emulate("390x844x3,mobile,touch");
       open(url);
@@ -315,7 +320,7 @@ test(
       assert.notEqual(g.panelPosition, "fixed");
       assert.equal(g.panel.top, 56);
       assert.equal(g.panel.bottom, g.viewport.height);
-      assert.equal(g.panel.right - g.panel.left, 360, "desktop panel keeps its width");
+      assert.equal(g.panel.right - g.panel.left, 432, "desktop panel is 30vw between its 360px and 640px bounds");
       assert.equal(g.chat.inert, false);
       assert.equal(g.frame.right, g.panel.left, "artifact and panel sit side by side");
     } finally {

@@ -118,6 +118,8 @@ const panel = /** @type {HTMLElement} */ (document.getElementById("panel"));
 const panelHead = /** @type {HTMLDivElement} */ (document.getElementById("panelHead"));
 const panelSummary = /** @type {HTMLSpanElement} */ (document.getElementById("panelSummary"));
 const panelToggle = /** @type {HTMLButtonElement} */ (document.getElementById("panelToggle"));
+const conversationToggle = /** @type {HTMLButtonElement} */ (document.getElementById("conversationToggle"));
+const conversationStatus = /** @type {HTMLSpanElement} */ (document.getElementById("conversationStatus"));
 const panelScrim = /** @type {HTMLDivElement} */ (document.getElementById("panelScrim"));
 const sendButton = /** @type {HTMLButtonElement} */ (document.getElementById("send"));
 const sendAndEndButton = /** @type {HTMLButtonElement} */ (document.getElementById("sendAndEnd"));
@@ -791,6 +793,7 @@ chatLog.addEventListener("error", replaceExpiredThumbnail, true);
 const DEFAULT_SEND_HINT = "Write a message or annotate an element first.";
 
 function showSendHint(message = DEFAULT_SEND_HINT, holdMs = 2600, focusInput = true) {
+  revealConversation();
   sendHint.textContent = message;
   sendHint.hidden = false;
   clearTimeout(sendHintTimer);
@@ -1153,7 +1156,10 @@ function setAgentPresence(state) {
 }
 
 function setHandoffSuperseded(visible) {
+  const wasHidden = !handoffBanner || handoffBanner.hidden;
   if (handoffBanner) handoffBanner.hidden = ended || !visible;
+  if (visible && !ended && wasHidden) revealConversation();
+  renderConversationStatus();
 }
 
 // The server this page was connected to went away. What is true beyond that depends on why, so
@@ -1177,7 +1183,10 @@ function setChromeOutdated(visible, reason = chromeOutdatedReason) {
   if (outdatedText) outdatedText.textContent = chromeOutdatedCopy(chromeOutdatedReason);
   outdatedReloadInFlight = false;
   if (outdatedReloadButton) outdatedReloadButton.disabled = false;
+  const wasHidden = !outdatedBanner || outdatedBanner.hidden;
   if (outdatedBanner) outdatedBanner.hidden = ended || !visible;
+  if (visible && !ended && wasHidden) revealConversation();
+  renderConversationStatus();
 }
 
 function setReviewState(state) {
@@ -1291,12 +1300,70 @@ const sheetMedia = typeof window.matchMedia === "function" ? window.matchMedia(M
 // The user's intent, kept across a chrome reload so a live-reload or server upgrade does not drop
 // them back onto a closed dock mid-conversation.
 let sheetOpen = readSheetOpen();
-// The latest agent reply that landed while the sheet was closed: the dock previews it until the
-// user opens the sheet, so a reply never arrives silently behind the artifact.
+// The latest agent reply that landed while the conversation was out of view (phone sheet closed,
+// or desktop sidebar hidden): the dock or the toolbar reports it until the user shows the
+// conversation, so a reply never arrives silently behind the artifact.
 let unreadAgentReply = "";
 /** @type {{ pointerId: any, startY: number, moved: boolean } | null} */
 let sheetDrag = null;
 let suppressSheetClick = false;
+
+// ---- Wide-layout conversation sidebar ----
+// Above the phone breakpoint the toolbar's Conversation switch hides the side panel and gives the
+// artifact the full window width. The choice is a layout preference, so it lives in localStorage
+// for every review in this browser, independent of the phone sheet's per-tab open state.
+const conversationHiddenStorageKey = "lavish-axi:conversation-hidden";
+let conversationHidden = readConversationHidden();
+
+function readConversationHidden() {
+  try {
+    return localStorage.getItem(conversationHiddenStorageKey) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function isConversationHidden() {
+  return conversationHidden && !isMobileSheet();
+}
+
+function setConversationHidden(hidden) {
+  conversationHidden = Boolean(hidden);
+  try {
+    if (conversationHidden) localStorage.setItem(conversationHiddenStorageKey, "1");
+    else localStorage.removeItem(conversationHiddenStorageKey);
+  } catch {
+    // Storage refused only stops the preference surviving a reload.
+  }
+  if (!conversationHidden) unreadAgentReply = "";
+  applySheetState();
+  if (!isConversationHidden()) scrollPanelToBottom();
+}
+
+// Something the user must read or act on appeared in the panel (a send warning, a server or
+// other-tab notice, a failed attachment): show the hidden sidebar so the message is visible.
+function revealConversation() {
+  if (isConversationHidden()) setConversationHidden(false);
+}
+
+conversationToggle.addEventListener("click", () => setConversationHidden(!conversationHidden));
+
+// While the sidebar is hidden the toolbar carries what the dock carries on a phone, plus the
+// notices that would otherwise sit unseen in the hidden composer.
+function renderConversationStatus() {
+  const hidden = isConversationHidden();
+  const parts = [];
+  if (hidden) {
+    if (!ended && handoffBanner && !handoffBanner.hidden) parts.push("Open in another tab");
+    if (!ended && outdatedBanner && !outdatedBanner.hidden) parts.push("Server notice");
+    const summary = sheetSummary();
+    parts.push(summary.unread ? "New reply" : summary.text);
+  }
+  const status = parts.join(" · ");
+  conversationStatus.textContent = status;
+  conversationStatus.title = status;
+  conversationStatus.hidden = !hidden;
+}
 
 function readSheetOpen() {
   try {
@@ -1326,18 +1393,25 @@ function setSheetOpen(open) {
   if (sheetOpen) scrollPanelToBottom();
 }
 
-// Re-derives every sheet attribute from the phone layout, sheet-open, and session-ended state so a
-// viewport crossing the breakpoint in either direction cannot make an ended panel interactive or
-// leave a closed dock trapping focus.
+// Re-derives every sheet and sidebar attribute from the phone layout, sheet-open, sidebar-hidden,
+// and session-ended state so a viewport crossing the breakpoint in either direction cannot make an
+// ended panel interactive, leave a closed dock trapping focus, or hide the phone dock.
 function applySheetState() {
   const mobile = isMobileSheet();
   const open = mobile && sheetOpen;
   document.body.classList.toggle("sheet-open", open);
   const docked = mobile && !open;
+  const hidden = isConversationHidden();
+  document.body.classList.toggle("conversation-hidden", hidden);
+  panel.inert = hidden;
+  conversationToggle.setAttribute("aria-pressed", hidden ? "false" : "true");
+  conversationToggle.title = hidden ? "Show conversation" : "Hide conversation";
   panelScroll.inert = ended || docked;
   chatComposer.inert = ended || docked;
   const activeElement = document.activeElement;
-  if (docked && activeElement && (panelScroll.contains(activeElement) || chatComposer.contains(activeElement))) {
+  if (hidden && activeElement && panel.contains(activeElement)) {
+    conversationToggle.focus();
+  } else if (docked && activeElement && (panelScroll.contains(activeElement) || chatComposer.contains(activeElement))) {
     panelToggle.focus();
   }
   panelToggle.setAttribute("aria-expanded", open ? "true" : "false");
@@ -1360,6 +1434,7 @@ function sheetSummary() {
 }
 
 function renderSheetSummary() {
+  renderConversationStatus();
   const summary = sheetSummary();
   panelSummary.textContent = summary.text;
   panelSummary.classList.toggle("is-accent", summary.accent);
@@ -1377,7 +1452,7 @@ function pulseSheetDock() {
 }
 
 function noteAgentReply(text) {
-  if (!isMobileSheet() || sheetOpen) return;
+  if (isMobileSheet() ? sheetOpen : !conversationHidden) return;
   unreadAgentReply = String(text || "");
   renderSheetSummary();
   pulseSheetDock();
@@ -1490,6 +1565,7 @@ function editQueuedPrompt(index, { reveal = true } = {}) {
   editingDraft = String(prompt.prompt || "");
   editFocusPending = true;
   if (isMobileSheet()) setSheetOpen(true);
+  else revealConversation();
   render();
   if (reveal && prompt.selector) postToFrame({ type: "lavish:revealElement", selector: String(prompt.selector) });
 }
@@ -1737,12 +1813,17 @@ function createChatAttachmentsController() {
   let nextId = 0;
   let capRejected = false;
   let sendBlocked = false;
+  // Failed chips already shown to the user, so only a newly failed one reveals a hidden sidebar.
+  let shownErrorIds = new Set();
 
   function currentImageCount() {
     return items.filter((item) => item.file && CHAT_ATTACHMENT_MIME.has(item.file.type)).length;
   }
 
   function renderAttachments() {
+    const errorIds = new Set(items.filter((item) => item.status === "error").map((item) => item.localId));
+    if ([...errorIds].some((id) => !shownErrorIds.has(id))) revealConversation();
+    shownErrorIds = errorIds;
     chatAttachments.innerHTML = items
       .map((item) => {
         const status = item.status === "uploading" ? "Uploading…" : item.status === "error" ? item.error : "";
