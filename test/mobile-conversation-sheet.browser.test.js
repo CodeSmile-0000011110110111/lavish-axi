@@ -320,7 +320,7 @@ test(
       assert.notEqual(g.panelPosition, "fixed");
       assert.equal(g.panel.top, 56);
       assert.equal(g.panel.bottom, g.viewport.height);
-      assert.equal(g.panel.right - g.panel.left, 432, "desktop panel is 30vw between its 360px and 640px bounds");
+      assert.equal(g.panel.right - g.panel.left, 360, "desktop panel is a fixed 360px column");
       assert.equal(g.chat.inert, false);
       assert.equal(g.frame.right, g.panel.left, "artifact and panel sit side by side");
     } finally {

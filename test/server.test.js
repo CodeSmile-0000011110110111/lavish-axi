@@ -803,7 +803,7 @@ test("chrome declares the Lavish design-system tokens", async () => {
   assert.match(css, /--ease:cubic-bezier\(.2,.6,.2,1\)/);
   assert.match(css, /--dur-slow:320ms/);
   assert.match(css, /--bar-h:56px/);
-  assert.match(css, /--panel-w:clamp\(360px,30vw,640px\)/);
+  assert.match(css, /--panel-w:360px/);
 });
 
 test("artifact SDK uses design-token aliases for annotation highlight and shadow UI", () => {
@@ -844,6 +844,17 @@ test("chrome page ships the phone conversation dock and the viewport contract it
     /<button class="panel-toggle" id="panelToggle" type="button" aria-expanded="false" aria-controls="panel" aria-label="Show conversation">/,
   );
   assert.match(html, /<span class="panel-summary" id="panelSummary" role="status" aria-live="polite"><\/span>/);
+});
+
+test("chrome top bar carries the Conversation switch with no status line under it", () => {
+  const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
+
+  // A status line stacked under the switch moved the switch up each time it appeared.
+  assert.match(
+    html,
+    /<button class="annotate-switch conversation-switch" id="conversationToggle" type="button" aria-pressed="true" aria-controls="panel" title="Hide conversation">.*?<span>Conversation<\/span><\/button><div class="more-wrap" id="moreWrap">/,
+  );
+  assert.doesNotMatch(html, /conversationStatus/);
 });
 
 test("chrome top bar follows the design mock wordmark and overflow menu treatment", async () => {

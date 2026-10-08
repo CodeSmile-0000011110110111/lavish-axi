@@ -7144,13 +7144,11 @@ test("crossing the breakpoint in either direction leaves no sheet state behind",
 
 function sidebarState(chrome) {
   const toggle = chrome.element("conversationToggle");
-  const status = chrome.element("conversationStatus");
   return {
     hidden: chrome.element("body").classList.contains("conversation-hidden"),
     panelInert: Boolean(chrome.element("panel").inert),
     pressed: toggle["aria-pressed"],
     title: toggle.title,
-    status: status.hidden ? null : status.textContent,
     stored: chrome.localStore.get("lavish-axi:conversation-hidden") || null,
   };
 }
@@ -7163,7 +7161,6 @@ test("the toolbar Conversation switch hides and restores the desktop sidebar and
   assert.equal(state.panelInert, false);
   assert.equal(state.pressed, "true");
   assert.equal(state.title, "Hide conversation");
-  assert.equal(state.status, null, "the toolbar says nothing while the panel itself is visible");
 
   chrome.element("chatInput").value = "Keep this draft";
   chrome.element("conversationToggle").dispatch("click", {});
@@ -7172,7 +7169,6 @@ test("the toolbar Conversation switch hides and restores the desktop sidebar and
   assert.equal(state.panelInert, true, "the hidden panel is unreachable by keyboard");
   assert.equal(state.pressed, "false");
   assert.equal(state.title, "Show conversation");
-  assert.equal(state.status, "Agent not listening");
   assert.equal(state.stored, "1");
   assert.equal(chrome.element("chatInput").value, "Keep this draft", "hiding keeps the composer draft");
 
@@ -7180,7 +7176,6 @@ test("the toolbar Conversation switch hides and restores the desktop sidebar and
   state = sidebarState(chrome);
   assert.equal(state.hidden, false);
   assert.equal(state.panelInert, false);
-  assert.equal(state.status, null);
   assert.equal(state.stored, null);
 });
 
@@ -7197,27 +7192,19 @@ test("a hidden desktop sidebar stays hidden across a chrome reload and in other 
   assert.equal(state.pressed, "false");
 });
 
-test("the toolbar reports queued notes and unread replies while the sidebar is hidden", async () => {
+// The toolbar carries the Conversation switch alone: a status line under it moved the switch up
+// whenever it appeared, so queued notes and replies wait in the hidden panel itself.
+test("queueing a note or receiving a reply leaves the hidden sidebar hidden", async () => {
   const chrome = await createChromeHarness({ fetchImpl: async () => ({ ok: true, json: async () => ({}) }) });
   chrome.element("conversationToggle").dispatch("click", {});
 
-  chrome.eventSource().listeners.get("agent-presence")({ data: JSON.stringify({ state: "listening" }) });
-  assert.equal(sidebarState(chrome).status, "Agent listening");
-
   chrome.eventSource().listeners.get("agent-reply")({ data: JSON.stringify({ text: "Renamed the payment step." }) });
-  assert.equal(sidebarState(chrome).status, "New reply");
-
   chrome.sendFrameMessage({
     type: "lavish:queuePrompt",
     prompt: { prompt: "Call this Payment method", selector: "h2", tag: "element", text: "Payment" },
   });
-  assert.equal(sidebarState(chrome).status, "1 queued");
   assert.equal(sidebarState(chrome).hidden, true, "queueing from the artifact leaves the sidebar hidden");
-
-  // Showing the sidebar shows the reply, so hiding it again owes no unread report.
-  chrome.element("conversationToggle").dispatch("click", {});
-  chrome.element("conversationToggle").dispatch("click", {});
-  assert.equal(sidebarState(chrome).status, "1 queued");
+  assert.equal(chrome.queued().length, 1);
 });
 
 test("a new notice or send warning reveals the hidden desktop sidebar", async () => {
@@ -7229,12 +7216,11 @@ test("a new notice or send warning reveals the hidden desktop sidebar", async ()
   assert.equal(chrome.element("outdatedBanner").hidden, false);
   assert.equal(sidebarState(chrome).hidden, false, "the server notice is shown where it can be acted on");
 
-  // Hiding again while the same notice stands keeps it hidden and names the notice in the toolbar.
+  // Hiding again while the same notice stands keeps it hidden.
   chrome.element("conversationToggle").dispatch("click", {});
   sendChromeOutdated(chrome, "upgrade");
   await flushPromises();
   assert.equal(sidebarState(chrome).hidden, true);
-  assert.match(sidebarState(chrome).status, /^Server notice · /);
 
   chrome.element("outdatedDismiss").click();
   chrome.element("send").click();
@@ -7259,7 +7245,6 @@ test("a hidden desktop sidebar never hides the phone dock, and returns when the 
   let state = sidebarState(chrome);
   assert.equal(state.hidden, false, "the phone layout ignores the desktop preference");
   assert.equal(state.panelInert, false, "the dock stays reachable");
-  assert.equal(state.status, null);
   chrome.element("panelHead").dispatch("click", {});
   assert.equal(sheetState(chrome).open, true);
 
@@ -7294,11 +7279,40 @@ test("a queued note is a dashed bubble at the end of the conversation with its a
     /<span class="anchor-kind">&lt;h2&gt;<\/span><span class="anchor-excerpt">“Phase 1: Inventory”<\/span>/,
   );
   assert.match(html, /title="Phase 1: Inventory\nh2#phase-1"/);
-  assert.match(html, /<div class="bubble-text">Rename this<\/div>/);
+  assert.match(html, /<div class="bubble-text queued-summary" title="Rename this">Rename this<\/div>/);
   assert.equal(
     chrome.element("chatLog").children.length,
     0,
     "nothing joins the transcript until the server accepts it",
+  );
+});
+
+// A board answer queued with `window.lavish.queuePrompt(text, { data })` carries its data as a JSON
+// block the SDK appends under "Context data:". The queued bubble is one line: the answer's words
+// only, with the whole prompt on hover, so a run of answers does not fill the panel with JSON.
+test("a queued note shows its words on one line and leaves the Context data block out of the bubble", async () => {
+  const chrome = await createChromeHarness();
+  const prompt = 'R1-Q5: B\nKeep the\tsidebar fixed\n\nContext data:\n{\n  "question": "R1-Q5",\n  "choice": "B"\n}';
+  chrome.sendFrameMessage({ type: "lavish:queuePrompt", prompt: { prompt, tag: "message" } });
+
+  const html = chrome.element("queuedLog").innerHTML;
+  assert.match(html, /<div class="bubble-text queued-summary" title="[^"]*">R1-Q5: B Keep the sidebar fixed<\/div>/);
+  assert.doesNotMatch(html, />[^<]*Context data/, "the JSON block is not bubble text");
+  const title = html.match(/class="bubble-text queued-summary" title="([^"]*)"/)?.[1];
+  assert.equal(title.replaceAll("&quot;", '"'), prompt, "the full prompt stays readable on hover");
+  assert.equal(chrome.queued()[0].prompt, prompt, "the queued prompt itself keeps its data for the agent");
+});
+
+test("a queued note made only of Context data names the block instead of showing the JSON", async () => {
+  const chrome = await createChromeHarness();
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: '\n\nContext data:\n{\n  "choice": "B"\n}', tag: "message" },
+  });
+
+  assert.match(
+    chrome.element("queuedLog").innerHTML,
+    /<div class="bubble-text queued-summary" title="[^"]*">Context data<\/div>/,
   );
 });
 
