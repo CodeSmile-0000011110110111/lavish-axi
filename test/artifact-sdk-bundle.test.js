@@ -423,8 +423,8 @@ test("queuePrompt keeps plain text when the board passes one options object", ()
   assert.equal(item._lavishQueueKey, "R1-Q5");
 });
 
-// The chrome's queued bubble cuts the prompt at this exact heading (queuedSummaryText in
-// src/chrome-client.js), so the SDK's data block format is pinned here.
+// The chrome's queued bubble, hover text, and editor cut the prompt at this heading line
+// (splitQueuedPrompt in src/chrome-client.js), so the SDK's data block format is pinned here.
 test("queuePrompt appends options.data under the Context data heading the chrome summary cuts at", () => {
   const sdk = bootSdk();
   const { evidence } = buildTable(sdk);

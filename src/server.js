@@ -1458,6 +1458,9 @@ export async function serve({
       await watchSession(session, watchers, events, logEvent, reloadDebounceMs);
       const artifactHtml = await readFile(session.file, "utf8").catch(() => "");
       const { faviconTag, title } = extractArtifactHead(artifactHtml);
+      // The page names /chrome-client.js and /chrome.css, which are no-store too, so a reload after
+      // an upgrade always runs the installed chrome.
+      res.setHeader("cache-control", "no-store");
       // Nothing legitimately frames the review chrome - it is the top-level
       // page, and shares/exports ship standalone HTML rather than embedding it.
       // Refusing to be framed denies an attacker page both a window handle to
@@ -1604,6 +1607,7 @@ export async function serve({
 
   app.get("/chrome-client.js", async (req, res, next) => {
     try {
+      res.setHeader("cache-control", "no-store");
       res.type("application/javascript").send(await readFile(chromeClientUrl, "utf8"));
     } catch (error) {
       next(error);
@@ -1612,6 +1616,7 @@ export async function serve({
 
   app.get("/chrome.css", async (req, res, next) => {
     try {
+      res.setHeader("cache-control", "no-store");
       res.type("text/css").send(await readFile(chromeCssUrl, "utf8"));
     } catch (error) {
       next(error);
