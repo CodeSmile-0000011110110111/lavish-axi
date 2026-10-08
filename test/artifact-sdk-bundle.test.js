@@ -415,9 +415,7 @@ test("queuePrompt keeps plain text when the board passes one options object", ()
   const sdk = bootSdk();
   const { evidence } = buildTable(sdk);
 
-  sdk.api.queuePrompt(
-    { queueKey: "R1-Q5", text: "R1-Q5: B", element: evidence },
-  );
+  sdk.api.queuePrompt({ queueKey: "R1-Q5", text: "R1-Q5: B", element: evidence });
 
   const item = sdk.posted.at(-1).prompt;
   assert.equal(item.prompt, "R1-Q5: B");
