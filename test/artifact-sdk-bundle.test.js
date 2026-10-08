@@ -411,6 +411,32 @@ test("the served SDK bundle resolves table coordinates only for annotation click
   assert.equal(sdk.posted.at(-1).prompt.target, undefined);
 });
 
+test("queuePrompt keeps plain text when the board passes one options object", () => {
+  const sdk = bootSdk();
+  const { evidence } = buildTable(sdk);
+
+  sdk.api.queuePrompt(
+    { queueKey: "R1-Q5", text: "R1-Q5: B", element: evidence },
+  );
+
+  const item = sdk.posted.at(-1).prompt;
+  assert.equal(item.prompt, "R1-Q5: B");
+  assert.notEqual(item.prompt, "[object Object]");
+  assert.equal(item._lavishQueueKey, "R1-Q5");
+});
+
+test("queuePrompt string body still works with separate options", () => {
+  const sdk = bootSdk();
+  const { evidence } = buildTable(sdk);
+
+  sdk.api.queuePrompt("R1-Q7: B", { element: evidence, queueKey: "R1-Q7", tag: "choice" });
+
+  const item = sdk.posted.at(-1).prompt;
+  assert.equal(item.prompt, "R1-Q7: B");
+  assert.equal(item.tag, "choice");
+  assert.equal(item._lavishQueueKey, "R1-Q7");
+});
+
 test("the served SDK bundle annotates elements outside tables with no table target", () => {
   const sdk = bootSdk();
   const paragraph = appendTo(sdk.body, cell("p", "Just prose"));

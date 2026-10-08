@@ -844,13 +844,34 @@ function applyTranscriptBound(session) {
 // Returns `{ prompt, malformed }`: `malformed` is non-empty when the payload's
 // `attachments` field exists but cannot be honored as written, which fails the
 // whole batch rather than being normalized away (C4, see queuePrompts).
+function fieldToPlainString(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value === "[object Object]" ? "" : value;
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value);
+  if (typeof value === "object") {
+    if (typeof value.prompt === "string") return value.prompt;
+    if (typeof value.text === "string") return value.text;
+    if (typeof value.message === "string") return value.message;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return "";
+    }
+  }
+  const coerced = String(value);
+  return coerced === "[object Object]" ? "" : coerced;
+}
+
 function normalizePrompt(prompt) {
+  let body = fieldToPlainString(prompt.prompt);
+  const text = fieldToPlainString(prompt.text);
+  if (!body && text) body = text;
   const normalized = {
     uid: String(prompt.uid || ""),
-    prompt: String(prompt.prompt || ""),
+    prompt: body,
     selector: String(prompt.selector || ""),
     tag: String(prompt.tag || ""),
-    text: String(prompt.text || ""),
+    text,
   };
   const promptId = normalizePromptId(prompt.prompt_id);
   if (promptId) normalized.prompt_id = promptId;

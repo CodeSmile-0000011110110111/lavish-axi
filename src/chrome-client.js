@@ -448,10 +448,31 @@ function adoptQueuedPrompt(rawPrompt, keepIdentity) {
   return prompt;
 }
 
+function plainPromptField(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value === "[object Object]" ? "" : value;
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value);
+  if (typeof value === "object") {
+    if (typeof value.prompt === "string") return value.prompt;
+    if (typeof value.text === "string") return value.text;
+    if (typeof value.message === "string") return value.message;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return "";
+    }
+  }
+  const coerced = String(value);
+  return coerced === "[object Object]" ? "" : coerced;
+}
+
 function sanitizeQueuedPrompt(prompt) {
   if (!prompt || typeof prompt !== "object") return null;
-  if (!("attachments" in prompt)) return prompt;
   const clean = { ...prompt };
+  clean.prompt = plainPromptField(clean.prompt);
+  if ("text" in clean) clean.text = plainPromptField(clean.text);
+  if (!clean.prompt && clean.text) clean.prompt = clean.text;
+  if (!("attachments" in clean)) return clean;
   const refs = sanitizeAttachmentRefs(clean.attachments);
   if (refs.length) clean.attachments = refs;
   else delete clean.attachments;

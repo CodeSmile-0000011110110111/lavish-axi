@@ -69,6 +69,31 @@ test("queued prompts are returned with DOM snapshot context and then cleared", a
   }
 });
 
+test("queuePrompts coerces object prompt bodies instead of storing [object Object]", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+  try {
+    const stateFile = path.join(dir, "state.json");
+    const artifact = path.join(dir, "artifact.html");
+    await writeFile(artifact, "<h1>Hello</h1>");
+
+    const store = new SessionStore(stateFile);
+    const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+    await store.queuePrompts(session.key, {
+      prompts: [
+        { uid: "1", prompt: { text: "R1-Q5: B", queueKey: "R1-Q5" }, selector: "td", tag: "td", text: "cell" },
+        { uid: "2", prompt: "[object Object]", selector: "td", tag: "td", text: "R1-Q7: B" },
+      ],
+    });
+
+    const first = feedbackResult(await store.takeFeedback(session.key));
+    assert.equal(first.prompts[0].prompt, "R1-Q5: B");
+    assert.notEqual(first.prompts[0].prompt, "[object Object]");
+    assert.equal(first.prompts[1].prompt, "R1-Q7: B");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("queued text selection prompts preserve range anchors", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
   try {
