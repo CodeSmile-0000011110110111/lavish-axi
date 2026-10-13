@@ -112,6 +112,7 @@ function bootSdk({
   revisionsScript = null,
   revisionMarkElements = [],
   htmlAnnotate = null,
+  platform = "Linux",
 } = {}) {
   const posted = [];
   const documentListeners = [];
@@ -136,7 +137,7 @@ function bootSdk({
 
   const sandbox = {
     parent: { postMessage: (message) => posted.push(message) },
-    navigator: { platform: "Linux" },
+    navigator: { platform },
     CSS: { escape: (value) => String(value) },
     Element: class Element {},
     MutationObserver: class MutationObserver {
@@ -772,9 +773,15 @@ function buildLink(sdk) {
   return { link, inner };
 }
 
-for (const modifier of ["ctrlKey", "metaKey"]) {
-  test(`${modifier}-click on a link in annotate mode follows the link instead of annotating`, () => {
-    const sdk = bootSdk();
+// The follow modifier is the platform's own: Cmd on macOS, Ctrl elsewhere. Meta on Linux/Windows
+// is the Super/Windows key, which is not a link-follow gesture there, so it annotates like a plain click.
+for (const [platform, modifier] of [
+  ["MacIntel", "metaKey"],
+  ["Linux x86_64", "ctrlKey"],
+  ["Win32", "ctrlKey"],
+]) {
+  test(`${modifier}-click on a link on ${platform} follows the link instead of annotating`, () => {
+    const sdk = bootSdk({ platform });
     const { link, inner } = buildLink(sdk);
 
     for (const target of [link, inner]) {
@@ -782,6 +789,22 @@ for (const modifier of ["ctrlKey", "metaKey"]) {
       assert.equal(event.defaultPrevented, false, "the browser's own link handling runs");
     }
     assert.equal(sdk.cards().length, 0);
+  });
+}
+
+for (const [platform, modifier] of [
+  ["Linux x86_64", "metaKey"],
+  ["Win32", "metaKey"],
+  ["MacIntel", "ctrlKey"],
+]) {
+  test(`${modifier}-click on a link on ${platform} annotates like a plain click`, () => {
+    const sdk = bootSdk({ platform });
+    const { link } = buildLink(sdk);
+
+    const event = sdk.click(link, { [modifier]: true });
+
+    assert.equal(event.defaultPrevented, true, "the SDK keeps the frame from navigating");
+    assert.match(sdk.card().innerHTML, /Annotate &lt;a&gt;/);
   });
 }
 
