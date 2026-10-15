@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.89](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.88...lavish-axi-v0.1.89) (2026-10-15)
+
+
+### Bug Fixes
+
+* ignore the enter that confirms an ime conversion ([#424](https://github.com/kunchenguid/lavish-axi/issues/424)) ([9bdc01e](https://github.com/kunchenguid/lavish-axi/commit/9bdc01e2e124fa7e2f7dbe71e2027fdfa9a1538c))
+
 ## [0.1.88](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.87...lavish-axi-v0.1.88) (2026-10-13)
 
 
