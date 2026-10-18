@@ -30,6 +30,7 @@ import {
   readAttachmentUploadBody,
   resolveArtifactAsset,
   resolveDesignAssetPath,
+  resolveBrowserDisconnectGraceMs,
   resolveIdleTimeoutMs,
   resolveWatchTarget,
   serve,
@@ -4415,6 +4416,20 @@ test("resolveIdleTimeoutMs defaults, parses, and only explicit opt-outs disable"
   assert.equal(resolveIdleTimeoutMs({ LAVISH_AXI_IDLE_TIMEOUT_MS: "-1" }), 30 * 60_000);
   assert.equal(resolveIdleTimeoutMs({ LAVISH_AXI_IDLE_TIMEOUT_MS: "30000ms" }), 30 * 60_000);
   assert.equal(resolveIdleTimeoutMs({ LAVISH_AXI_IDLE_TIMEOUT_MS: "later" }), 30 * 60_000);
+  // Node's setTimeout ceiling is 2^31-1 ms; larger delays fire after 1ms instead.
+  assert.equal(resolveIdleTimeoutMs({ LAVISH_AXI_IDLE_TIMEOUT_MS: "3000000000" }), 2 ** 31 - 1);
+});
+
+test("resolveBrowserDisconnectGraceMs defaults, parses, and only explicit opt-outs disable", () => {
+  assert.equal(resolveBrowserDisconnectGraceMs({}), 10_000);
+  assert.equal(resolveBrowserDisconnectGraceMs({ LAVISH_AXI_DISCONNECT_GRACE_MS: "" }), 10_000);
+  assert.equal(resolveBrowserDisconnectGraceMs({ LAVISH_AXI_DISCONNECT_GRACE_MS: " 120000 " }), 120_000);
+  assert.equal(resolveBrowserDisconnectGraceMs({ LAVISH_AXI_DISCONNECT_GRACE_MS: "0" }), null);
+  assert.equal(resolveBrowserDisconnectGraceMs({ LAVISH_AXI_DISCONNECT_GRACE_MS: "OFF" }), null);
+  assert.equal(resolveBrowserDisconnectGraceMs({ LAVISH_AXI_DISCONNECT_GRACE_MS: "-1" }), 10_000);
+  assert.equal(resolveBrowserDisconnectGraceMs({ LAVISH_AXI_DISCONNECT_GRACE_MS: "30000ms" }), 10_000);
+  assert.equal(resolveBrowserDisconnectGraceMs({ LAVISH_AXI_DISCONNECT_GRACE_MS: "later" }), 10_000);
+  assert.equal(resolveBrowserDisconnectGraceMs({ LAVISH_AXI_DISCONNECT_GRACE_MS: "3000000000" }), 2 ** 31 - 1);
 });
 
 async function expectDoneWithin(server, ms) {
@@ -4923,6 +4938,73 @@ test("closing the last review WebSocket releases an active poll without ending t
       (response) => response.json(),
     );
     assert.deepEqual(stillOpen, { status: "waiting" });
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("LAVISH_AXI_DISCONNECT_GRACE_MS sets the reconnect grace a served poll waits out", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  const server = await serve({
+    env: { ...process.env, LAVISH_AXI_DISCONNECT_GRACE_MS: "20" },
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+  });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const opened = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    }).then((response) => response.json());
+    const browser = await startPresenceStream(base, opened.key);
+    assert.equal(await browser.next(), "waiting");
+    // A poll that outlives the 20ms grace but not the 10s default proves the env value was used.
+    const poll = fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=1000`).then((response) =>
+      response.json(),
+    );
+    assert.equal(await browser.next(), "listening");
+    await browser.close();
+    assert.deepEqual(await poll, { status: "browser_disconnected" });
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("LAVISH_AXI_DISCONNECT_GRACE_MS=off keeps an active poll waiting after the last review disconnects", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  const server = await serve({
+    env: { ...process.env, LAVISH_AXI_DISCONNECT_GRACE_MS: "off" },
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+  });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const opened = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    }).then((response) => response.json());
+    const browser = await startPresenceStream(base, opened.key);
+    assert.equal(await browser.next(), "waiting");
+    const poll = fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=150`).then((response) =>
+      response.json(),
+    );
+    assert.equal(await browser.next(), "listening");
+    await browser.close();
+    assert.deepEqual(await poll, { status: "waiting" }, "with the grace off only the poll's own timeout ends it");
+    const next = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`).then((response) =>
+      response.json(),
+    );
+    assert.deepEqual(next, { status: "waiting" }, "no stale browser_disconnected may be left for a later poll");
   } finally {
     await server.close();
     await rm(dir, { recursive: true, force: true });

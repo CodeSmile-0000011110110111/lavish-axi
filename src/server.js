@@ -125,7 +125,7 @@ const WEBSOCKET_CLOSE_GRACE_MS = 250;
 // suppresses idle shutdown and makes presence wrong. Reaped on the next heartbeat after one
 // unanswered ping.
 const LIVE_EVENT_HEARTBEAT_MS = 30_000;
-const BROWSER_DISCONNECT_GRACE_MS = 10_000;
+const DEFAULT_BROWSER_DISCONNECT_GRACE_MS = 10_000;
 // An escaped popup can navigate to an artifact-owned HTML or SVG asset on the
 // server origin. Keep every artifact response sandboxed at the response layer
 // so active documents stay opaque-origin even when they are top-level.
@@ -269,7 +269,22 @@ export function resolveIdleTimeoutMs(env = process.env) {
   if (raw === "0" || raw.toLowerCase() === "off") return null;
   const value = Number(raw);
   if (!Number.isFinite(value) || value <= 0) return DEFAULT_IDLE_TIMEOUT_MS;
-  return value;
+  return Math.min(value, 2147483647);
+}
+
+// How long an active poll waits for a review page to reconnect after the last one drops before it
+// returns browser_disconnected. A phone that locks or backgrounds the tab drops its socket, so the
+// 10s default can be too short there. Set LAVISH_AXI_DISCONNECT_GRACE_MS to a custom millisecond
+// budget, or to 0/off so a disconnect never releases the poll (only feedback, an end, or its own
+// timeout does). Both resolvers clamp to 2147483647 ms, setTimeout's maximum; a larger delay would
+// overflow and fire after about 1 ms.
+export function resolveBrowserDisconnectGraceMs(env = process.env) {
+  const raw = env.LAVISH_AXI_DISCONNECT_GRACE_MS?.trim();
+  if (raw === undefined || raw === "") return DEFAULT_BROWSER_DISCONNECT_GRACE_MS;
+  if (raw === "0" || raw.toLowerCase() === "off") return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return DEFAULT_BROWSER_DISCONNECT_GRACE_MS;
+  return Math.min(value, 2147483647);
 }
 
 /**
@@ -284,7 +299,7 @@ export async function serve({
   log = null,
   pollHeartbeatMs = 15_000,
   liveEventHeartbeatMs = LIVE_EVENT_HEARTBEAT_MS,
-  browserDisconnectGraceMs = BROWSER_DISCONNECT_GRACE_MS,
+  browserDisconnectGraceMs = resolveBrowserDisconnectGraceMs(env),
   idleTimeoutMs = resolveIdleTimeoutMs(),
   host = bindHost(env),
   hosts,
@@ -409,6 +424,7 @@ export async function serve({
 
   function scheduleBrowserDisconnect(key) {
     clearBrowserDisconnectTimer(key);
+    if (browserDisconnectGraceMs === null) return;
     if (shuttingDown || hasLiveEventClient(key) || !activePolls.has(key)) return;
     const timer = setTimeout(() => {
       browserDisconnectTimers.delete(key);
