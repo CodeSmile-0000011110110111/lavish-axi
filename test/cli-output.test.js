@@ -105,6 +105,18 @@ function assertObservablePollWakePath(text) {
   assert.doesNotMatch(text, /foreground command may run.*run the poll as a background task/i);
 }
 
+test("home help names LAVISH_AXI_ALLOWED_HOSTS for the 403 forbidden host case", () => {
+  const output = createHomeOutput({ bin: "lavish-axi", sessions: [] });
+  const hostHelp = output.help.find((item) => item.includes("LAVISH_AXI_ALLOWED_HOSTS"));
+
+  assert.ok(hostHelp, "home help names the allowlist variable");
+  assert.match(hostHelp, /403 `forbidden host`/);
+  assert.match(hostHelp, /reverse-proxy/);
+  assert.match(hostHelp, /README's Allowed hosts section/);
+  assert.doesNotMatch(hostHelp, /whitespace-separated/);
+  assert.match(hostHelp, /`lavish-axi stop`/);
+});
+
 test("CLI version tracks package.json so release-please bumps reach the published binary", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(VERSION, packageJson.version);
