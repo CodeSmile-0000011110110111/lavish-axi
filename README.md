@@ -266,10 +266,27 @@ A board can open Lavish's recording panel with
 Use a stable section id (1–64 letters, digits, underscores, or hyphens; `exports` is reserved).
 The panel provides **Record**, **Stop**, numbered takes, playback and seeking, downloads,
 explicit deletion confirmation, and **Use this take**. Opening a board or its panel never
-requests microphone access. Click **Record** in the panel and accept the browser's normal
-microphone permission. Use localhost, `127.0.0.1`, or HTTPS in a browser supporting
+requests microphone access. The browser preserves its normal microphone consent.
+Use localhost, `127.0.0.1`, or HTTPS in a browser supporting
 `MediaRecorder`; an ordinary HTTP LAN address cannot record. Permission and device errors
 leave Record available for retry.
+
+| Input | Action |
+| --- | --- |
+| Record | Request microphone access for a new take. |
+| Browser Allow | Grant permission and begin capture. |
+| Stop | Release the microphone and save this take. |
+| Audio Play | Listen to a saved take. |
+| Audio seek bar | Move to another position in the take. |
+| Use this take | Select the take and queue its unchanged local export path. |
+| Download | Keep a separate audio backup. |
+| Delete | Open a confirmation before removing the take. |
+| Confirm delete | Remove the take while retaining existing exports. |
+| Retry save | Retry saving audio retained after a storage failure. |
+| Download unsaved take | Keep a recovery copy of unsaved audio. |
+| Discard unsaved take | Confirm removal of unsaved audio. |
+| Close | Return to the board and Conversation panel. |
+| Send to Agent | Deliver queued notes and selected audio references. |
 
 Each section belongs to the board's canonical file path. Closing and reopening that board
 preserves its takes and selected take. A new file path starts a separate collection.
@@ -283,14 +300,14 @@ state directory when the variable is unset). Playback performs no audio processi
 Saved files and metadata survive browser data clearing and server restart as long as the
 state directory is retained. Downloads provide a separate backup. This directory is local
 storage, and deleting it or losing its disk loses the recordings. A browser close/crash
-before the save completes can lose the current take; stop and wait for **saved to local disk**.
+before the save completes can lose the current take. **Saved to local disk** confirms persistence.
 A failed save keeps the audio in the open tab with **Retry save**, **Download unsaved take**,
 and an explicit discard action. Audio is limited to 30 minutes and 64 MiB per take,
 100 takes per section, and 512 MiB across recording storage. Limits never evict saved takes.
 
 **Use this take** saves the selection and preserves an unchanged export under the session's
 `exports/` directory. It queues the server's absolute audio path, SHA-256, and duration for
-the agent. **Send to Agent** delivers that note with the user's other queued notes.
+the agent. Delivery includes the user's other queued notes.
 The path belongs to the machine running Lavish; a remote agent needs the downloaded file
 transferred to its machine. Deleting a take keeps previously created exports available for
 editing. Archive those exports separately when they are no longer needed.

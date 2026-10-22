@@ -16,11 +16,12 @@ export const PLAYBOOKS = [
     design_rules: [
       "The trusted Lavish panel owns Record/Stop, playback/seek, numbered takes, deletion confirmation, downloads, and Use this take. The artifact's sandbox cannot capture microphone audio.",
       "Opening the panel requests no microphone. Record requires a user click and normal browser permission at localhost, 127.0.0.1, or HTTPS.",
+      "Present each input instruction on its own row, with the control name in a consistent first column and its description aligned in the second column. Use a table or CSS grid.",
       "Use section ids of 1–64 letters, digits, underscores, or hyphens, beginning with a letter or digit; exports is reserved. Each canonical board file has its own recordings.",
     ],
     pitfalls: [
       "Do not start recording or playback on page load, during publication checks, or from an automatic callback.",
-      "Use this take queues a real server-local export path. The user presses Send to Agent to deliver it. Preserve other queued notes and composer drafts.",
+      "Selection queues a real server-local export path for explicit delivery. Preserve other queued notes and composer drafts.",
       "An older server needs an authorized update before recording works. A board-side script cannot add the trusted microphone and disk routes.",
     ],
     lavish_notes: [

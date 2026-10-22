@@ -2023,9 +2023,7 @@ body.layout-gate-active iframe#artifact {
 .recording-dialog::backdrop {
   background: #000b;
 }
-.recording-heading,
-.recording-actions,
-.recording-recovery {
+.recording-heading {
   display: flex;
   gap: 12px;
   align-items: center;
@@ -2088,4 +2086,19 @@ body.layout-gate-active iframe#artifact {
   margin-top: 12px;
   padding: 12px;
   border: 1px solid #d59b8d;
+}
+
+.recording-inputs {
+  display: grid;
+  grid-template-columns: minmax(0, 10rem) minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+}
+.recording-inputs > * {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.recording-inputs dt {
+  font-weight: 600;
 }
