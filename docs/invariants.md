@@ -113,6 +113,26 @@ Staleness is hash-based (`mermaidSourceHash`): a live reload that changes the di
 "Queue feedback" exports the scene and a PNG server-side (`POST .../feedback-files`), then queues a normal prompt with `tag: "whiteboard"` and an `excalidraw-scene` target carrying a bounded edit summary (diffed from the conversion baseline by `summarizeSceneEdits` in `src/whiteboard-core.js` using the stable ids), local `scenePath`/`previewPath`, `sourceHash`, and bounded stats; poll guidance tells the agent to read the summary first and update the Mermaid source, never the scene file.
 The Mermaid source in the artifact stays authoritative; there is no scene→Mermaid reverse conversion.
 
+### Local recording takes
+
+`src/recording-client.js` runs in the trusted chrome. The artifact remains opaque-origin
+and can only request that a recording section opens through the token-stamped SDK
+`openRecorder` message. Microphone access requires a trusted Record click in that panel.
+Opening a board, loading its SDK, and checking a publication request no microphone.
+Every stop/close/error path releases acquired tracks; a late permission result after
+close stops its tracks immediately. Playback stops before capture and before another take
+plays. Failed saves retain their bytes and id for explicit retry/download/discard.
+
+`src/recording-store.js` owns take identity, original bytes, numbering, selected id, and
+retained exports. The server supplies `store.runExclusive` for mutations. Audio and JSON
+sidecars stay outside `state.json`, in owner-only recording directories. A retry with the
+same id and bytes is idempotent; conflicting bytes fail. Export paths are server-derived.
+Use this take queues through the existing chrome queue, never sends, and retained exports
+survive take deletion. All recording routes require a same-origin Origin or Referer in
+addition to the Host allowlist. Container validation, bounded uploads, bounded stored
+bytes, and explicit deletion keep this route separate from the image attachment lifecycle.
+The browser suite owns proof of real media behavior through the artifact/chrome boundary.
+
 ### Image attachments
 
 Annotation image attachments (`src/attachment-store.js`) are content-addressed: the id is `<sha256-of-bytes>.<ext>` and the file under `<state-dir>/attachments/<sessionKey>/` _is_ the identity, so the client never dictates a path or id.

@@ -6,6 +6,30 @@ export const PLAYBOOK_ROUTER_HELP =
 
 export const PLAYBOOKS = [
   {
+    id: "recording",
+    use_when: "Capture local microphone audio with multiple takes and playback in a board",
+    choose: ["Use Lavish's built-in recording panel for reusable section-based microphone recording."],
+    structure: [
+      "Give each recording section a stable id and an explicit button that calls window.lavish.openRecorder({ section: 'opening', label: 'Opening' }).",
+      "Keep the button disabled when window.lavish.openRecorder is unavailable; enable it after DOMContentLoaded when the injected SDK is ready.",
+    ],
+    design_rules: [
+      "The trusted Lavish panel owns Record/Stop, playback/seek, numbered takes, deletion confirmation, downloads, and Use this take. The artifact's sandbox cannot capture microphone audio.",
+      "Opening the panel requests no microphone. Record requires a user click and normal browser permission at localhost, 127.0.0.1, or HTTPS.",
+      "Present each input instruction on its own row, with the control name in a consistent first column and its description aligned in the second column. Use a table or CSS grid.",
+      "Use section ids of 1–64 letters, digits, underscores, or hyphens, beginning with a letter or digit; exports is reserved. Each canonical board file has its own recordings.",
+    ],
+    pitfalls: [
+      "Do not start recording or playback on page load, during publication checks, or from an automatic callback.",
+      "Selection queues a real server-local export path for explicit delivery. Preserve other queued notes and composer drafts.",
+      "An older server needs an authorized update before recording works. A board-side script cannot add the trusted microphone and disk routes.",
+    ],
+    lavish_notes: [
+      "Saved takes persist in the server state directory. Download important audio as a separate backup. An incomplete save can be lost when the tab closes.",
+      "HTML export and hosted sharing omit audio. A remote editing worker needs the downloaded audio transferred to its machine.",
+    ],
+  },
+  {
     id: "diagram",
     use_when: "Explain relationships, flows, state, architecture, and concepts with illustrations",
     choose: [
