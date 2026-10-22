@@ -8,12 +8,21 @@ export function createRecordingPanel({ key, queueTake, isEnded }) {
   dialog.id = "recordingDialog";
   dialog.setAttribute("aria-labelledby", "recordingTitle");
   dialog.innerHTML = `<div class="recording-heading"><h2 id="recordingTitle">Record takes</h2><button type="button" data-action="close">Close</button></div>
-    <p>Record separate takes, listen, then use one for editing. The original audio stays unchanged.</p>
-    <div class="recording-actions"><button type="button" data-action="record">Record</button><button type="button" data-action="stop" disabled>Stop</button><button type="button" data-action="refresh">Refresh takes</button></div>
+    <p>Each section keeps separate numbered takes. The original audio stays unchanged.</p>
+    <div class="recording-inputs">
+      <button type="button" data-action="record">Record</button><span>Request microphone access for a new take.</span>
+      <button type="button" data-action="stop" disabled>Stop</button><span>Release the microphone and save this take.</span>
+      <button type="button" data-action="refresh">Refresh takes</button><span>Reload saved takes from local storage.</span>
+    </div>
     <p role="status" aria-live="polite" id="recordingStatus"></p>
-    <div class="recording-recovery" hidden><button type="button" data-action="retry">Retry save</button><button type="button" data-action="download-unsaved">Download unsaved take</button><button type="button" data-action="discard">Discard unsaved take</button></div>
+    <div class="recording-recovery recording-inputs" hidden>
+      <button type="button" data-action="retry">Retry save</button><span>Try saving the retained audio again.</span>
+      <button type="button" data-action="download-unsaved">Download unsaved take</button><span>Keep a recovery copy in your downloads.</span>
+      <button type="button" data-action="discard">Discard unsaved take</button><span>Confirm removal of the unsaved audio.</span>
+    </div>
     <div id="recordingTakes"></div>
-    <p class="recording-storage">Saved takes live in this Lavish server's local state directory. Download important audio as a backup. Closing the tab before saving finishes can lose the current take. Use this take preserves a local export and queues its path; Send to Agent delivers it.</p>`;
+    <p class="recording-storage">Saved takes live in this Lavish server's local state directory. Downloads provide a separate backup. Closing the tab before saving finishes can lose the current take.</p>
+    <dl class="recording-inputs recording-storage"><dt>Send to Agent</dt><dd>Deliver queued notes from the Conversation panel after closing the recorder.</dd></dl>`;
   document.body.append(dialog);
   const status = dialog.querySelector("#recordingStatus");
   const title = dialog.querySelector("#recordingTitle");
@@ -79,12 +88,17 @@ export function createRecordingPanel({ key, queueTake, isEnded }) {
       if (activeRequest === controller) activeRequest = null;
     }
   }
-  function action(text, handler, parent) {
+  function action(text, handler, parent, description = "") {
     const control = document.createElement("button");
     control.type = "button";
     control.textContent = text;
     control.onclick = handler;
     parent.append(control);
+    if (description) {
+      const detail = document.createElement("span");
+      detail.textContent = description;
+      parent.append(detail);
+    }
     return control;
   }
   function download(url, filename) {
@@ -121,11 +135,11 @@ export function createRecordingPanel({ key, queueTake, isEnded }) {
       };
       audio.onerror = () =>
         message(
-          `Take ${take.number} could not be played. Refresh takes or download the audio for a compatible player.`,
+          `Take ${take.number} could not be played. The refresh and download controls remain available below.`,
         );
       row.append(audio);
       const actions = document.createElement("div");
-      actions.className = "recording-actions";
+      actions.className = "recording-inputs";
       action(
         "Use this take",
         async () => {
@@ -149,11 +163,13 @@ export function createRecordingPanel({ key, queueTake, isEnded }) {
           }
         },
         actions,
+        "Select this take and queue its local audio export path.",
       );
       action(
         "Download",
         () => download(`${endpoint(take.id)}?download=1`, `${section}-take-${take.number}.${take.extension}`),
         actions,
+        "Keep an unchanged audio copy in your downloads.",
       );
       action(
         "Delete",
@@ -186,6 +202,7 @@ export function createRecordingPanel({ key, queueTake, isEnded }) {
           row.append(confirm);
         },
         actions,
+        "Open a confirmation before removing this take. Existing exports remain available.",
       );
       row.append(actions);
       list.append(row);
@@ -200,7 +217,7 @@ export function createRecordingPanel({ key, queueTake, isEnded }) {
     try {
       manifest = await request(endpoint());
       loaded = true;
-      message("Ready. Click Record to request microphone access.");
+      message("Ready for a new take.");
     } catch (error) {
       loaded = false;
       message(error.message);
@@ -228,7 +245,7 @@ export function createRecordingPanel({ key, queueTake, isEnded }) {
     } catch (error) {
       phase = "unsaved";
       closeAfterSave = false;
-      message(`Take is not confirmed saved. ${error.message} Retry save or download it before leaving.`);
+      message(`Take is not confirmed saved. ${error.message} The recovery controls below are available.`);
     }
     render();
   }
@@ -299,7 +316,7 @@ export function createRecordingPanel({ key, queueTake, isEnded }) {
         recorder = null;
         if (!blob.size) {
           phase = "idle";
-          message("No audio was captured. Check the microphone and try Record again.");
+          message("No audio was captured. Check the microphone connection. Recording can be retried.");
           controls();
           return;
         }
@@ -320,7 +337,7 @@ export function createRecordingPanel({ key, queueTake, isEnded }) {
       controls();
       const tick = () => {
         const elapsed = performance.now() - started;
-        message(`Recording · ${(elapsed / 1000).toFixed(0)} seconds. Stop to save this take.`);
+        message(`Recording · ${(elapsed / 1000).toFixed(0)} seconds.`);
         if (elapsed >= 1800000) {
           recordError = "30 minute limit reached";
           stop();
@@ -334,8 +351,8 @@ export function createRecordingPanel({ key, queueTake, isEnded }) {
       phase = "idle";
       const explanation =
         error.name === "NotAllowedError"
-          ? "Microphone permission was refused. Allow microphone access in this site's browser controls, then click Record again."
-          : `Microphone unavailable: ${error.message} Check the device, then try Record again.`;
+          ? "Microphone permission was refused. This site's browser controls can restore microphone access. Recording can be retried."
+          : `Microphone unavailable: ${error.message} Check the device connection. Recording can be retried.`;
       message(explanation);
       controls();
     }
@@ -352,7 +369,7 @@ export function createRecordingPanel({ key, queueTake, isEnded }) {
       return;
     }
     if (pending) {
-      message("This take is not confirmed saved. Retry save, download it, or explicitly discard it before closing.");
+      message("This take is not confirmed saved. The recovery controls below remain available before closing.");
       return;
     }
     ++generation;
