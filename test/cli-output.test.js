@@ -379,6 +379,8 @@ test("design output prints copy-pasteable CDN URLs so agents can opt in to Daisy
   assert.match(output.design.summary, /^Use this .*fallback only if/i);
   assert.match(output.design.summary, /no design direction/i);
   assert.match(output.design.summary, /check first/i);
+  assert.match(output.design.summary, /start it with `<!doctype html>`/);
+  assert.match(output.design.summary, /quirks mode/);
   assert.match(output.design.cdn_snippet, /cdn\.jsdelivr\.net\/npm\/daisyui@/);
   assert.match(output.design.cdn_snippet, /cdn\.jsdelivr\.net\/npm\/daisyui@.*\/themes\.css/);
   assert.match(output.design.cdn_snippet, /cdn\.jsdelivr\.net\/npm\/@tailwindcss\/browser@/);

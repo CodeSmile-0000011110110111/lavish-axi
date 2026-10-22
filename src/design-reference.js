@@ -206,7 +206,7 @@ export function createDesignOutput() {
       summary:
         "Use this Lavish CDN fallback only if (1) the user gave no design direction and (2) you already inspected the project the artifact is about and found no design system or style conventions to match. If you have not checked the subject project yet, check first. Lavish does not auto-inject any design system; artifacts stay portable HTML. Paint an explicit page background and readable text. " +
         DESIGN_PRIORITY_RULE +
-        " Paste the CDN snippet below into your `<head>`.",
+        " Lavish adds only its SDK script to your file and never wraps a fragment, so start it with `<!doctype html>`: without one the page renders in quirks mode, where `<table>` text stops inheriting the color a wrapper theme sets. Paste the CDN snippet below into your `<head>`.",
       cdn_snippet: DESIGN_CDN_SNIPPET,
       cdn_urls: DESIGN_CDN_URLS,
       versions: { tailwind: TAILWIND_BROWSER_VERSION, daisyui: DAISYUI_VERSION },
