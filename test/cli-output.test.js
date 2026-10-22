@@ -347,7 +347,7 @@ test("top-level help renders static home output without dynamic sessions", async
     );
 
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /playbooks\[8\]/);
+    assert.match(result.stdout, /playbooks\[9\]/);
     assert.match(result.stdout, /lavish-axi playbook <playbook_id>/);
     assert.match(result.stdout, /reference other filesystem assets/);
     assert.match(result.stdout, /same directory as the HTML file/);
@@ -369,7 +369,7 @@ test("design output prints copy-pasteable CDN URLs so agents can opt in to Daisy
   const output = createDesignOutput();
 
   assert.match(output.playbook_router.instruction, /MUST open each matching playbook before writing HTML/);
-  assert.equal(output.playbook_router.playbooks.length, 8);
+  assert.equal(output.playbook_router.playbooks.length, 9);
   assert.equal(
     output.playbook_router.playbooks.find((playbook) => playbook.id === "diagram")?.use_when,
     "Explain relationships, flows, state, architecture, and concepts with illustrations",
@@ -440,10 +440,10 @@ test("design output recommends luxury as the default theme and warns against @ap
 test("playbook index output lists known playbooks with concise descriptions", () => {
   const output = createPlaybookOutput([]);
 
-  assert.equal(output.playbooks.length, 8);
+  assert.equal(output.playbooks.length, 9);
   assert.deepEqual(
     output.playbooks.map((playbook) => playbook.id),
-    ["diagram", "table", "comparison", "plan", "code", "input", "explanation", "slides"],
+    ["recording", "diagram", "table", "comparison", "plan", "code", "input", "explanation", "slides"],
   );
   assert.equal(
     output.playbooks.find((playbook) => playbook.id === "plan")?.use_when,

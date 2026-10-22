@@ -2471,7 +2471,15 @@ export function createArtifactSdk(
     return (dataTransfer.types || []).includes?.("Files");
   }
 
+  function openRecorder({ section = "", label = section } = {}) {
+    if (typeof section !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(section) || section === "exports") {
+      throw new Error("Recording section must be a stable id of 1–64 letters, digits, underscores, or hyphens.");
+    }
+    postArtifactMessage("lavish:openRecorder", { section, label: String(label || section).slice(0, 120) });
+  }
+
   /** @type {Window & { lavish?: unknown }} */ (window).lavish = {
+    openRecorder,
     queuePrompt,
     sendQueuedPrompts,
     endSession,
@@ -2486,6 +2494,8 @@ export function createArtifactSdk(
     if (event.source !== parent) return;
     const msg = event.data || {};
     if (msg.type === "lavish:setAnnotationMode") setAnnotationMode(msg.enabled);
+    if (msg.type === "lavish:pauseMedia")
+      document.querySelectorAll("audio, video").forEach((media) => /** @type {HTMLMediaElement} */ (media).pause());
     if (msg.type === "lavish:attachmentResult") {
       if (!isTrustedAttachmentResult(event, { parentWindow: parent, nonce: ATTACHMENT_NONCE })) return;
       activeAttachments?.handleResult(msg.localId, msg.ok, msg.id, msg.error);

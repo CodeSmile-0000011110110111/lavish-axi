@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en" data-lavish-annotate="off">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Local recording sections</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #11141a;
+        --fg: #fff5e6;
+        --accent: #f7c65c;
+      }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          18px/1.6 "Nunito",
+          "Segoe UI",
+          system-ui,
+          sans-serif;
+        margin: 0;
+      }
+      main {
+        width: min(1210px, calc(100% - 48px));
+        margin: 32px auto;
+      }
+      a {
+        color: var(--accent);
+      }
+      section {
+        border-top: 1px solid #657086;
+        padding: 16px 0;
+      }
+      button {
+        font: inherit;
+        color: #11141a;
+        background: var(--accent);
+        border: 0;
+        border-radius: 8px;
+        padding: 10px 16px;
+      }
+      button:disabled {
+        opacity: 0.55;
+      }
+      button:focus-visible {
+        outline: 2px solid var(--fg);
+        outline-offset: 3px;
+      }
+      code {
+        overflow-wrap: anywhere;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Record multiple takes in each board section</h1>
+      <p>
+        Open a section, click Record, then Stop to save. Listen and choose Use this take to queue an audio export for
+        editing.
+      </p>
+      <p id="availability" role="status">Recording requires a Lavish server with the recording feature.</p>
+      <nav aria-label="Contents">
+        <a href="#intro">Intro evolution</a> · <a href="#issues">Issues</a> · <a href="#opening">Opening</a> ·
+        <a href="#closing">Closing</a>
+      </nav>
+      <section id="intro">
+        <h2>Intro evolution</h2>
+        <p>Keep alternate introductions as separate numbered takes.</p>
+        <button type="button" data-section="intro-evolution" data-label="Intro evolution" disabled>Intro takes</button>
+      </section>
+      <section id="issues">
+        <h2>Issues</h2>
+        <p>Record the explanation of the current issues.</p>
+        <button type="button" data-section="issues" data-label="Issues" disabled>Issues takes</button>
+      </section>
+      <section id="opening">
+        <h2>Opening</h2>
+        <p>Compare the opening takes using playback.</p>
+        <button type="button" data-section="opening" data-label="Opening" disabled>Opening takes</button>
+      </section>
+      <section id="closing">
+        <h2>Closing</h2>
+        <p>Record a closing separately from the opening.</p>
+        <button type="button" data-section="closing" data-label="Closing" disabled>Closing takes</button>
+      </section>
+      <section>
+        <h2>Storage and handoff</h2>
+        <p>
+          Saved audio belongs to this board's canonical file path and the section id. Keep section ids stable when
+          revising a board in place. A new board file gets a separate recording collection. Recordings remain in the
+          server's local state directory after closing the browser. Download important takes as a separate backup.
+        </p>
+        <p>
+          Use this take queues the path of an unchanged local export. Press Send to Agent when your notes are ready.
+          Exported audio survives deleting its take from the list. HTML export and hosted sharing omit the recordings.
+        </p>
+      </section>
+    </main>
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        if (typeof window.lavish?.openRecorder !== "function") return;
+        document.getElementById("availability").textContent =
+          "Recording is available. Microphone access begins only after clicking Record in the Lavish panel.";
+        for (const button of document.querySelectorAll("[data-section]")) {
+          button.disabled = false;
+          button.onclick = () =>
+            window.lavish.openRecorder({ section: button.dataset.section, label: button.dataset.label });
+        }
+      });
+    </script>
+  </body>
+</html>

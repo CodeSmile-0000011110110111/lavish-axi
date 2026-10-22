@@ -3069,6 +3069,7 @@ async function endSession(terminal = null) {
 function markSessionEnded() {
   if (ended) return;
   ended = true;
+  recordingPanelPromise?.then((panel) => panel.close()).catch(() => {});
   pendingAcknowledgements.clear();
   clearSendAcknowledgementWarning();
   terminalSubmission = null;
@@ -3512,6 +3513,7 @@ async function replaceArtifactFrame({ recoveryRetry = false } = {}) {
   // The next document reports its own registry once it loads; until then the
   // previous revision's legend would point at blocks that may no longer exist.
   resetRevisionLegend();
+  recordingPanelPromise?.then((panel) => panel.close()).catch(() => {});
   frame.src = artifactFrameSrcForLoad({ revision, token });
   return true;
 }
@@ -4199,6 +4201,50 @@ async function reloadChromeForOutdatedBanner() {
   }
 }
 
+let recordingPanelPromise = null;
+async function openRecordingPanel(section, label) {
+  if (
+    ended ||
+    terminalSubmission ||
+    typeof section !== "string" ||
+    !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(section) ||
+    section === "exports"
+  )
+    return;
+  if (!recordingPanelPromise) {
+    recordingPanelPromise = import("./recording-client.js")
+      .then(({ createRecordingPanel }) =>
+        createRecordingPanel({
+          key,
+          isEnded: () => ended || Boolean(terminalSubmission),
+          queueTake: ({ section, label, take }) => {
+            if (ended || terminalSubmission) return false;
+            const accepted = enqueuePrompt({
+              kind: "page",
+              prompt: `Use take ${take.number} for ${label} (section ${section}). Original audio export on the Lavish server: ${JSON.stringify(take.path)}. SHA-256: ${take.sha256}. Duration: ${take.durationMs} ms.`,
+              [internalQueueKeyField]: `recording:${section}`,
+            });
+            if (accepted) pulseSheetDock();
+            return accepted;
+          },
+        }),
+      )
+      .catch((error) => {
+        recordingPanelPromise = null;
+        throw error;
+      });
+  }
+  try {
+    const panel = await recordingPanelPromise;
+    if (!ended && !terminalSubmission) {
+      postToFrame({ type: "lavish:pauseMedia" });
+      await panel.open(section, String(label || section).slice(0, 120));
+    }
+  } catch (error) {
+    showSendHint(`Recorder unavailable: ${error.message}. Try opening it again.`, 12000, false);
+  }
+}
+
 window.addEventListener("message", (event) => {
   if (event.source !== frame.contentWindow) return;
 
@@ -4254,6 +4300,7 @@ window.addEventListener("message", (event) => {
     // Reconcile even if frame load replayed the old mode before this report arrived.
     postToFrame({ type: "lavish:setAnnotationMode", enabled: annotation && !ended });
   }
+  if (msg.type === "lavish:openRecorder") void openRecordingPanel(msg.section, msg.label);
   if (msg.type === "lavish:queuePrompt") {
     enqueuePrompt(msg.prompt);
     // Queued from inside the artifact, where the closed dock is the only sign it landed.

@@ -264,6 +264,44 @@ pnpm link
 - **Allowed hosts** - To defend against DNS rebinding, the server rejects (`403`) any request whose `Host` header is missing or not one it answers to: loopback names plus the concrete Tailscale IPv4 address and MagicDNS name when the Tailscale listener is successfully bound. If you configure a reverse proxy or another intentional hostname, list it in `LAVISH_AXI_ALLOWED_HOSTS` (whitespace-separated). Behind a reverse proxy, the forwarded `X-Forwarded-Host` is validated against the same list, so add the public hostname there and have the proxy send it together with `X-Forwarded-Proto`. Set `LAVISH_AXI_ALLOWED_HOSTS` to `*` to disable the check entirely, only when the server sits behind your own authentication or proxy. Mutating routes also reject a present foreign `Origin` or `Referer` (`403`); header-less CLI control requests remain allowed where supported.
 - **Browser opening** - Set `LAVISH_AXI_NO_OPEN=1`, equivalent to `--no-open`, to create or resume a session without launching a browser window.
 
+## Local recording boards
+
+A board can open Lavish's recording panel with
+`window.lavish.openRecorder({ section: "opening", label: "Opening" })` from a button.
+Use a stable section id (1–64 letters, digits, underscores, or hyphens; `exports` is reserved).
+The panel provides **Record**, **Stop**, numbered takes, playback and seeking, downloads,
+explicit deletion confirmation, and **Use this take**. Opening a board or its panel never
+requests microphone access. Click **Record** in the panel and accept the browser's normal
+microphone permission. Use localhost, `127.0.0.1`, or HTTPS in a browser supporting
+`MediaRecorder`; an ordinary HTTP LAN address cannot record. Permission and device errors
+leave Record available for retry.
+
+Each section belongs to the board's canonical file path. Closing and reopening that board
+preserves its takes and selected take. A new file path starts a separate collection.
+The runnable [recording board example](test/fixtures/recording-board.html) includes four
+independent sections and disables its buttons when the SDK lacks recording support.
+[Integration instructions](docs/recording-boards.md) cover new versions of existing boards.
+
+**Stop** releases the microphone and saves the original audio on the Lavish server's disk
+under `<LAVISH_AXI_STATE_DIR>/recordings/<session-key>/<section>/` (using the usual Lavish
+state directory when the variable is unset). Playback performs no audio processing.
+Saved files and metadata survive browser data clearing and server restart as long as the
+state directory is retained. Downloads provide a separate backup. This directory is local
+storage, and deleting it or losing its disk loses the recordings. A browser close/crash
+before the save completes can lose the current take; stop and wait for **saved to local disk**.
+A failed save keeps the audio in the open tab with **Retry save**, **Download unsaved take**,
+and an explicit discard action. Audio is limited to 30 minutes and 64 MiB per take,
+100 takes per section, and 512 MiB across recording storage. Limits never evict saved takes.
+
+**Use this take** saves the selection and preserves an unchanged export under the session's
+`exports/` directory. It queues the server's absolute audio path, SHA-256, and duration for
+the agent. **Send to Agent** delivers that note with the user's other queued notes.
+The path belongs to the machine running Lavish; a remote agent needs the downloaded file
+transferred to its machine. Deleting a take keeps previously created exports available for
+editing. Archive those exports separately when they are no longer needed.
+HTML export and hosted shares omit recorded audio. The recording panel requires this
+feature's Lavish server and SDK; copying board HTML into an older server cannot add it.
+
 ## CLI Reference
 
 | Command                         | Description                                                                                                                                                                                                                                                                                                                                               |
@@ -284,7 +322,7 @@ pnpm link
 | `lavish-axi setup plugin`       | Register the installed package as an [Agent Plugin](https://agent-plugins.org) in VS Code, Cursor, and GitHub Copilot CLI; opt-in, idempotent, no marketplace involved. Reload each client afterward.                                                                                                                                                     |
 | `lavish-axi server`             | Run the local Lavish Editor server.                                                                                                                                                                                                                                                                                                                       |
 
-Known playbook IDs: `diagram`, `table`, `comparison`, `plan`, `code`, `input`, `explanation`, `slides`.
+Known playbook IDs: `recording`, `diagram`, `table`, `comparison`, `plan`, `code`, `input`, `explanation`, `slides`.
 One artifact often combines several playbooks, such as a plan that includes a comparison and a diagram, so agents must match against each `use_when` trigger and open every matching playbook before writing HTML.
 For flows, architecture, state, or sequence diagrams, open the diagram playbook for the recommended tooling and SVG guidance.
 
