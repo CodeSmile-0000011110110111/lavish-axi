@@ -271,22 +271,22 @@ Use localhost, `127.0.0.1`, or HTTPS in a browser supporting
 `MediaRecorder`; an ordinary HTTP LAN address cannot record. Permission and device errors
 leave Record available for retry.
 
-| Input | Action |
-| --- | --- |
-| Record | Request microphone access for a new take. |
-| Browser Allow | Grant permission and begin capture. |
-| Stop | Release the microphone and save this take. |
-| Audio Play | Listen to a saved take. |
-| Audio seek bar | Move to another position in the take. |
-| Use this take | Select the take and queue its unchanged local export path. |
-| Download | Keep a separate audio backup. |
-| Delete | Open a confirmation before removing the take. |
-| Confirm delete | Remove the take while retaining existing exports. |
-| Retry save | Retry saving audio retained after a storage failure. |
-| Download unsaved take | Keep a recovery copy of unsaved audio. |
-| Discard unsaved take | Confirm removal of unsaved audio. |
-| Close | Return to the board and Conversation panel. |
-| Send to Agent | Deliver queued notes and selected audio references. |
+| Input                 | Action                                                     |
+| --------------------- | ---------------------------------------------------------- |
+| Record                | Request microphone access for a new take.                  |
+| Browser Allow         | Grant permission and begin capture.                        |
+| Stop                  | Release the microphone and save this take.                 |
+| Audio Play            | Listen to a saved take.                                    |
+| Audio seek bar        | Move to another position in the take.                      |
+| Use this take         | Select the take and queue its unchanged local export path. |
+| Download              | Keep a separate audio backup.                              |
+| Delete                | Open a confirmation before removing the take.              |
+| Confirm delete        | Remove the take while retaining existing exports.          |
+| Retry save            | Retry saving audio retained after a storage failure.       |
+| Download unsaved take | Keep a recovery copy of unsaved audio.                     |
+| Discard unsaved take  | Confirm removal of unsaved audio.                          |
+| Close                 | Return to the board and Conversation panel.                |
+| Send to Agent         | Deliver queued notes and selected audio references.        |
 
 Each section belongs to the board's canonical file path. Closing and reopening that board
 preserves its takes and selected take. A new file path starts a separate collection.
