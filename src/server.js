@@ -1,3 +1,4 @@
+import { installRecordingRoutes } from "./recording-routes.js";
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
@@ -738,8 +739,26 @@ export async function serve({
     // WITHOUT draining the body, which leaves the browser's in-flight upload to be
     // reset mid-stream instead of receiving the 413.
     if (req.method === "POST" && isAttachmentUploadApiPath(req.path)) return next();
+    if (req.method === "PUT" && /^\/api\/[^/]+\/recordings\/[^/]+\/[^/]+$/.test(req.path)) return next();
     if (isWhiteboardWriteApiPath(req.path)) return whiteboardJsonParser(req, res, next);
     return defaultJsonParser(req, res, next);
+  });
+
+  installRecordingRoutes(app, {
+    stateDir: path.dirname(stateFile),
+    store,
+    sameOrigin: (req) => isSameOriginRequest(req, allowedHostnames, allowAnyHostname),
+    readBody: readAttachmentUploadBody,
+  });
+
+  app.get("/recording-client.js", async (_req, res, next) => {
+    try {
+      res
+        .type("application/javascript")
+        .send(await readFile(new URL("./recording-client.js", import.meta.url), "utf8"));
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.get("/", (_req, res) => {

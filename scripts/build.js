@@ -46,6 +46,7 @@ await esbuild.build({
 await chmod("dist/server.mjs", 0o755);
 
 await copyFile("src/chrome-client.js", "dist/chrome-client.js");
+await copyFile("src/recording-client.js", "dist/recording-client.js");
 await copyFile("src/chrome.css", "dist/chrome.css");
 await mkdir("dist/design", { recursive: true });
 await copyFile("node_modules/daisyui/daisyui.css", "dist/design/daisyui.css");
