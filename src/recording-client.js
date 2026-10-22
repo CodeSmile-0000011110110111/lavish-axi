@@ -134,9 +134,7 @@ export function createRecordingPanel({ key, queueTake, isEnded }) {
         playing = audio;
       };
       audio.onerror = () =>
-        message(
-          `Take ${take.number} could not be played. The refresh and download controls remain available below.`,
-        );
+        message(`Take ${take.number} could not be played. The refresh and download controls remain available below.`);
       row.append(audio);
       const actions = document.createElement("div");
       actions.className = "recording-inputs";

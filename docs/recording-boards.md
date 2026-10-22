@@ -106,18 +106,18 @@ the real browser permission-refusal path. The test also explicitly sends the sel
 take note through a live Lavish poll with an unrelated composer draft preserved.
 Real microphone acceptance remains a user action after activation:
 
-| Input | Action |
-| --- | --- |
-| Section takes | Open the recording panel. |
-| Record | Request microphone access. |
-| Browser Allow | Grant permission and begin capture. |
-| Microphone | Speak a short test recording. |
-| Stop | Save the take and release the microphone. |
-| Audio Play | Check the recorded voice. |
-| Audio seek bar | Check playback at another position. |
-| Use this take | Select the take and queue its local export path. |
-| Download | Save a separate audio copy for verification. |
-| Close | Return to the board and Conversation panel. |
-| Send to Agent | Deliver the queued export reference. |
+| Input          | Action                                           |
+| -------------- | ------------------------------------------------ |
+| Section takes  | Open the recording panel.                        |
+| Record         | Request microphone access.                       |
+| Browser Allow  | Grant permission and begin capture.              |
+| Microphone     | Speak a short test recording.                    |
+| Stop           | Save the take and release the microphone.        |
+| Audio Play     | Check the recorded voice.                        |
+| Audio seek bar | Check playback at another position.              |
+| Use this take  | Select the take and queue its local export path. |
+| Download       | Save a separate audio copy for verification.     |
+| Close          | Return to the board and Conversation panel.      |
+| Send to Agent  | Deliver the queued export reference.             |
 
 Verify that the downloaded audio and exported file contain the selected take.
